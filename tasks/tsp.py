@@ -18,34 +18,25 @@ import itertools
 from collections import namedtuple
 
 
-#######################################
-# Reward Fn
-#######################################
-def reward(sample_solution, USE_CUDA=False):
+def reward(tour, use_cuda=False):
     """
-    Args:
-        List of length sourceL of [batch_size] Tensors
-    Returns:
-        Tensor of shape [batch_size] containins rewards
+    Parameters
+    ----------
+    tour: torch.FloatTensor of size (batch_size, num_features, seq_len)
+
+    Returns
+    -------
+    Euclidean distance between consecutive nodes on the route of size (batch_size, seq_len)
     """
-    batch_size = sample_solution[0].size(0)
-    n = len(sample_solution)
-    tour_len = Variable(torch.zeros([batch_size]))
 
-    if USE_CUDA:
-        tour_len = tour_len.cuda()
+    x = Variable(tour.permute(0, 2, 1))
 
-    for i in range(n - 1):
-        tour_len += torch.norm(sample_solution[i] - sample_solution[i + 1], dim=1)
+    # Make a full tour by returning to the start
+    y = torch.cat((x, x[:, 0:1]), dim=1)
 
-    tour_len += torch.norm(sample_solution[n - 1] - sample_solution[0], dim=1)
+    # Euclidean distance between each consecutive point
+    tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
-    # For TSP_20 - map to a number between 0 and 1
-    # min_len = 3.5
-    # max_len = 10.
-    # TODO: generalize this for any TSP size
-    #tour_len = -0.1538*tour_len + 1.538
-    #tour_len[tour_len < 0.] = 0.
     return tour_len
 
 
@@ -213,7 +204,7 @@ class TSPDataset(Dataset):
 
     def __init__(self, dataset_fname=None, train=False, size=50, num_samples=1000000, random_seed=1111):
         super(TSPDataset, self).__init__()
-        #start = torch.FloatTensor([[-1], [-1]])
+        # start = torch.FloatTensor([[-1], [-1]])
 
         torch.manual_seed(random_seed)
 
