@@ -17,29 +17,6 @@ import zipfile
 import itertools
 from collections import namedtuple
 
-
-def reward(tour, use_cuda=False):
-    """
-    Parameters
-    ----------
-    tour: torch.FloatTensor of size (batch_size, num_features, seq_len)
-
-    Returns
-    -------
-    Euclidean distance between consecutive nodes on the route of size (batch_size, seq_len)
-    """
-
-    x = Variable(tour.permute(0, 2, 1))
-
-    # Make a full tour by returning to the start
-    y = torch.cat((x, x[:, 0:1]), dim=1)
-
-    # Euclidean distance between each consecutive point
-    tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
-
-    return tour_len
-
-
 #######################################
 # Functions for downloading dataset
 #######################################
@@ -197,40 +174,117 @@ def create_dataset(
     return val
 
 
-#######################################
-# Dataset
-#######################################
 class TSPDataset(Dataset):
 
-    def __init__(self, dataset_fname=None, train=False, size=50, num_samples=1000000, random_seed=1111):
+    def __init__(self, fname=None, train=False, size=50, num_samples=1e6, seed=1234):
         super(TSPDataset, self).__init__()
-        # start = torch.FloatTensor([[-1], [-1]])
 
-        torch.manual_seed(random_seed)
+        torch.manual_seed(seed)
 
-        self.dataset = []
-        if not train:
-            with open(dataset_fname, 'r') as dset:
-                for l in tqdm(dset):
-                    inputs, outputs = l.split(' output ')
-                    sample = torch.zeros(1, )
-                    x = np.array(inputs.split(), dtype=np.float32).reshape([-1, 2]).T
-                    # y.append(np.array(outputs.split(), dtype=np.int32)[:-1]) # skip the last one
-                    self.dataset.append(x)
-        else:
-            # randomly sample points uniformly from [0, 1]
-            for l in tqdm(range(num_samples)):
-                x = torch.FloatTensor(2, size).uniform_(0, 1)
-                self.dataset.append(x)
-
-        self.size = len(self.dataset)
+        self.dataset = torch.FloatTensor(num_samples, 2, size).uniform_(0, 1)
+        self.dynamic = torch.zeros(num_samples, 1, size)
+        self.num_nodes = size
+        self.size = num_samples
 
     def __len__(self):
         return self.size
 
     def __getitem__(self, idx):
-        return self.dataset[idx]
+        return (self.dataset[idx], self.dynamic[idx], [])
+
+    @staticmethod
+    def update_mask(mask, dynamic, chosen_idx):
+
+        assert mask.shape[0] == dynamic.shape[0] == len(chosen_idx)
+
+        mask[np.arange(dynamic.size(0)), chosen_idx] = 0
+        return mask
+
+    @staticmethod
+    def reward(static, tour_indices, use_cuda=False):
+        """
+        Parameters
+        ----------
+        tour: torch.FloatTensor of size (batch_size, num_features, seq_len)
+
+        Returns
+        -------
+        Euclidean distance between consecutive nodes on the route of size (batch_size, seq_len)
+        """
+
+        assert all(len(a) == len(np.unique(a)) for a in tour_indices)
+
+        # Convert the indices back into a tour
+        idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
+        tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
+
+        x = Variable(tour)
+
+        # Make a full tour by returning to the start
+        y = torch.cat((x, x[:, 0:1]), dim=1)
+
+        # Euclidean distance between each consecutive point
+        tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
+
+        return tour_len
+
+    @staticmethod
+    def render(static, tour_indices):
+        import matplotlib.pyplot as plt
+
+        plt.close('all')
+
+        num_plots = min(int(np.sqrt(len(tour_indices))), 3)
+
+        for i in range(num_plots ** 2):
+
+            # Convert the indices back into a tour
+            idx = tour_indices[i]
+            if len(idx.size()) == 1:
+                idx = idx.unsqueeze(0)
+
+            idx = idx.expand(static.size(1), -1)
+            data = torch.gather(static[i].data, 1, idx).numpy()
+
+            plt.subplot(num_plots, num_plots, i + 1)
+            plt.plot(data[0], data[1])
+            plt.scatter(data[0], data[1], s=4, c='r')
+
+        plt.tight_layout()
 
 
 if __name__ == '__main__':
-    paths = download_google_drive_file('data/tsp', 'tsp', '', '50')
+
+    import sys
+    sys.path.append('..')
+    from model import DRL4VRP
+    from utils import gen_dataset
+
+    task = 'tsp_20'
+    train_size = 100000
+    val_size = 1000
+    batch_size = 64
+    static_size = 2
+    dynamic_size = 1
+    hidden_size = 128
+    dropout = 0.2
+    use_cuda = False
+    num_layers = 1
+    critic_beta = 0.9
+    max_grad_norm = 2.
+    actor_lr = 1e-3
+    actor_decay_step = 5000
+    actor_decay_rate = 0.96
+    plot_every = 10
+
+    model = DRL4VRP(static_size, dynamic_size, hidden_size, dropout,
+                    num_layers, critic_beta, max_grad_norm,
+                    actor_lr, actor_decay_step, actor_decay_rate,
+                    plot_every, use_cuda)
+
+    for epoch in range(100):
+
+        _, train, valid = gen_dataset(task, train_size, val_size)
+
+        reward_fn = train.reward
+        model.train(train, valid, reward_fn, batch_size)

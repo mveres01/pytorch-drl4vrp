@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 
 
@@ -67,7 +68,6 @@ def gen_dataset(task, num_train, num_val, data_dir='data'):
         from tasks import sorting as env
 
         input_dim = 1
-        reward_fn = env.reward
 
         train_name = env.create_dataset(num_train, data_dir, size, 'train')
         train = env.SortingDataset(train_name)
@@ -80,7 +80,6 @@ def gen_dataset(task, num_train, num_val, data_dir='data'):
         from tasks import tsp as env
 
         input_dim = 2
-        reward_fn = env.reward
 
         _ = env.create_dataset(problem_size=str(size), data_dir=data_dir_)
 
@@ -89,4 +88,4 @@ def gen_dataset(task, num_train, num_val, data_dir='data'):
     else:
         raise Exception('Task %s not supported' % COP)
 
-    return input_dim, reward_fn, train, valid
+    return input_dim, train, valid

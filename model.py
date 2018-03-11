@@ -1,4 +1,8 @@
 # File from: https://github.com/pemami4911/neural-combinatorial-rl-pytorch/blob/master/neural_combinatorial_rl.py
+import os
+import time
+import numpy as np
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -6,8 +10,8 @@ import torch.autograd as autograd
 import torch.optim as optim
 from torch.autograd import Variable
 import torch.nn.functional as F
-import math
-import numpy as np
+from torch.utils.data import DataLoader
+
 from utils import make_dot
 
 
@@ -110,33 +114,25 @@ class Decoder(nn.Module):
         if last_output is None:
             last_output = self.x0.expand(batch_size, -1)  # (batch_size, input_size)
 
-        # Calculate the output of the decoder through an embedding + GRU
         last_embedding = self.embedding(last_output).unsqueeze(0)
-
         rnn_output, hidden = self.gru(last_embedding, last_hidden)
         rnn_output = rnn_output.squeeze(0)
 
-        # Attention is applied across both the static and dynamic states of the
-        # inputs, and uses the representation from the current decoders output
+        # Attention is applied across the static and dynamic states of the input
         attn_weights = self.attn(static_enc, dynamic_enc, rnn_output).unsqueeze(1)
 
-        # The context vector is a weighted combination of the attention + embeddings
+        # The context vector is a weighted combination of the attention + inputs
         context = attn_weights.bmm(static_enc.permute(0, 2, 1))
 
-        # TODO: Convert this to use BMM instead of one-by-one
-        # Using the context vector, calculate the probability of the next output
-        outputs = []
-        for i in range(batch_size):
+        # Calculate the next output using Batch-matrix-multiply ops
+        context = context.permute(0, 2, 1).expand(-1, -1, seq_len)
+        context = torch.cat((static_enc, context), dim=1)
+        W_view = self.W.unsqueeze(0).expand(batch_size, -1, -1)
+        v_view = self.v.unsqueeze(0).expand(batch_size, -1, -1)
 
-            # (num_feats, 1) -> (num_feats, seq_len)
-            context_ = context[i].transpose(1, 0).expand(-1, seq_len)
+        outputs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, context)))
+        outputs = outputs.squeeze(1)
 
-            # energy = (num_static_feats + num_context_feats, seq_len)
-            energy = torch.cat((static_enc[i], context_), dim=0)
-            energy = torch.mm(self.v, F.tanh(torch.mm(self.W, energy)))
-            outputs.append(energy)
-
-        outputs = torch.cat(outputs, dim=0)
         return outputs, hidden
 
 
@@ -144,7 +140,7 @@ class DRL4VRP(nn.Module):
 
     def __init__(self, static_size, dynamic_size, hidden_size, dropout,
                  num_layers, critic_beta, max_grad_norm, actor_lr,
-                 actor_decay_step, actor_decay_rate, use_cuda):
+                 actor_decay_step, actor_decay_rate, plot_every, use_cuda):
         super(DRL4VRP, self).__init__()
 
         self.static_size = static_size
@@ -157,6 +153,7 @@ class DRL4VRP(nn.Module):
         self.actor_lr = actor_lr
         self.actor_decay_step = actor_decay_step
         self.actor_decay_rate = actor_decay_rate
+        self.plot_every = plot_every
         self.use_cuda = use_cuda
 
         # Define the encoder & decoder models
@@ -164,7 +161,68 @@ class DRL4VRP(nn.Module):
         self.decoder = Decoder(static_size, hidden_size, dropout, num_layers, use_cuda)
         self.optimizer = optim.Adam(self.parameters(), lr=self.actor_lr)
 
-    def train(self, task, train_size, val_size, batch_size):
+    def forward(self, static, dynamic, last_output=None, update_fn=None, mask_fn=None):
+        """
+        Parameters
+        ----------
+        mask_fn:
+            We can speed up learning by preventing states from being selected
+            by forcing a prob of -inf.
+        """
+
+        last_hidden = None
+        decoder_probs = []
+        decoder_indices = []
+        decoder_mask = Variable(torch.ones(static.size(0), static.size(2)))
+
+        static_enc, dynamic_enc = self.encoder(static, dynamic)
+
+        # If we've supplied a masking function, we'll use that to determine when
+        # to stop (and use an arbitrary number of iters). Otherwise, treat the
+        # problem as a TSP, and only perform iterations equal to the number of nodes
+        max_iters = static.size(2) if mask_fn is None else 1000
+
+        for _ in range(max_iters):
+
+            probs, last_hidden = self.decoder(static_enc, dynamic_enc,
+                                              last_output, last_hidden)
+
+            mask = decoder_mask.clone()
+
+            # Use mask.log() to prevent certain indices from being selected.
+            # Idea from: https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
+            probs = F.softmax(probs + mask.log(), dim=1)
+            top_k = torch.distributions.Categorical(probs).sample().data
+
+            # Broadcast top choice to collect ALL corresponding static elements
+            top_k_view = top_k.view(-1, 1, 1).expand(-1, static.size(1), -1)
+            next_output = torch.gather(static.data, 2, top_k_view)
+
+            last_output = Variable(next_output.squeeze(2))
+            if self.use_cuda:
+                last_output = last_output.cuda()
+
+            # Keep the probability of choosing the specific action
+            probs = probs[np.arange(static.size(0)), top_k]
+            decoder_probs.append(probs.unsqueeze(1))
+            decoder_indices.append(top_k.unsqueeze(1))
+
+            # Update the dynamics variables
+            if update_fn is not None:
+                dynamic = update_fn(dynamic.clone(), top_k)
+                static_enc, dynamic_enc = self.encoder(static, dynamic)
+
+            # Update the mask
+            if mask_fn is not None:
+                decoder_mask = mask_fn(decoder_mask, dynamic, top_k)
+                if not decoder_mask.byte().any():
+                    break
+
+        decoder_probs = torch.cat(decoder_probs, dim=1)  # (batch_size, seq_len)
+        decoder_indices = torch.cat(decoder_indices, dim=1)
+        return decoder_indices, decoder_probs
+
+    def train(self, trainset, valset, reward_fn, batch_size):
         """
         Procedure
         ---------
@@ -176,13 +234,12 @@ class DRL4VRP(nn.Module):
         6. Update data for the chosen dynamic element & compute new embedding
         """
 
-        # TODO: Change this so we pass a reward_fn to init(), and train,
-        # valid DATA to the drl4vrp.train() problem
-        # TODO: Force gen_dataset to yield (static, dynamic) elements from dataset
-        _, reward_fn, train, valid = gen_dataset(task,  train_size, val_size)
+        train_loader = DataLoader(trainset, batch_size, True, num_workers=0)
+        valid_loader = DataLoader(valset, 1, False, num_workers=0)
 
-        train_loader = DataLoader(train, batch_size, True, num_workers=0)
-        valid_loader = DataLoader(valid, 1, False, num_workers=0)
+        # (Possibly) use a mask to speed up training
+        mask_fn = getattr(trainset, 'update_mask', None)
+        update_fn = getattr(trainset, 'update_dynamic', None)
 
         critic_ema = torch.zeros(1)
         if self.use_cuda:
@@ -191,76 +248,30 @@ class DRL4VRP(nn.Module):
         losses, rewards = [], []
         for batch_idx, batch in enumerate(train_loader):
 
-            static = Variable(batch)
-            dynamic = Variable(torch.zeros(static.size(0), 1, static.size(2)))
-            decoder_mask = Variable(torch.ones(static.size(0), static.size(2)))
+            start = time.time()
 
-            last_output = None
-            last_hidden = None
-            decoder_outputs = []
-            decoder_probs = []
+            static = Variable(batch[0])
+            dynamic = Variable(batch[1])
+            initial_state = Variable(batch[2]) if len(batch[2]) > 0 else None
 
-            indices = []
+            # Full forward pass through the dataset
+            tour_indices, tour_probs = self.forward(static, dynamic,
+                                                    initial_state,
+                                                    update_fn, mask_fn)
 
-            static_enc, dynamic_enc = self.encoder(static, dynamic)
+            reward = reward_fn(static, tour_indices, self.use_cuda).sum(1)
 
-            # For problems such as TSP and VRP, we choose the next "node" to visit
-            # based on some probability. Given this choice, modify the dynamic
-            # variables of the chosen node based on the problem
-            for j in range(batch.size(2)):
-
-                probs, last_hidden = self.decoder(static_enc, dynamic_enc,
-                                                  last_output, last_hidden)
-
-                # For TSP problems where we only visit a city once, we can speed
-                # up training by preventing it from being selected again
-                mask = decoder_mask.clone()
-
-                # mask.log() will give visited cities a visit probability of -inf,
-                # Idea from: https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
-                probs = F.softmax(probs + mask.log(), dim=1)
-                topi = probs.multinomial(1).data  # select an action
-
-                # Need to select all static values to use as next decoder output,
-                # so we broadcast the top indices to match the batch size
-                next_output = torch.gather(batch, 2, topi.expand(-1, 2).unsqueeze(2))
-
-                last_output = Variable(next_output.squeeze(2))
-                if self.use_cuda:
-                    last_output = last_output.cuda()
-
-                # Save the data for current timestep
-                probs = probs[np.arange(batch.size(0)), topi.squeeze()]
-
-                decoder_probs.append(probs.unsqueeze(1))
-                decoder_outputs.append(next_output)
-
-                # TODO: UPDATE DYNAMIC ELEMENTS ONLY FOR THOSE THAT HAVE CHANGED
-                decoder_mask[np.arange(batch.size(0)), topi.squeeze()] = 0
-                # dynamic = Variable(decoder_mask.data.clone()).unsqueeze(1)
-                # static_enc, dynamic_enc = self.encoder(static, dynamic)
-
-            # Order of nodes to visit, size=(batch_size, num_feats, seq_len)
-            decoder_outputs = torch.cat(decoder_outputs, dim=2)
-
-            reward = reward_fn(decoder_outputs, self.use_cuda).sum(1)
-
+            # Update the network
             if batch_idx == 0:
                 critic_ema = reward.mean()
             else:
                 beta = self.critic_beta
                 critic_ema = (critic_ema * beta) + (1. - beta) * reward.mean()
-
-            advantage = reward - critic_ema
+            advantage = (reward - critic_ema)
 
             # Sum the log probabilities for each city in the tour
-            decoder_probs = torch.cat(decoder_probs, dim=1)
-            logp_tour = torch.log(decoder_probs).sum(1)
-
+            logp_tour = torch.log(tour_probs).sum(1)
             actor_loss = torch.mean(advantage * logp_tour)
-
-            # Check if weights are being updated
-            # a = list(p.data.numpy().copy() for p in self.parameters())
 
             self.optimizer.zero_grad()
             actor_loss.backward()
@@ -269,59 +280,109 @@ class DRL4VRP(nn.Module):
 
             critic_ema = critic_ema.detach()
 
-            # b = list(p.data.numpy().copy() for p in self.parameters())
-            # print('Equal?: ', [np.allclose(a_, b_) for a_, b_ in zip(a, b)])
-
-            # for param in self.parameters():
-            #    print('grad: ', param.grad.data.sum())
-
-            # GOAL: Average_reward for TSP20 = 3.89
+            # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
             rewards.append(reward.mean().data.numpy())
             losses.append(actor_loss.data.numpy())
-            lastx = 10
-            if (batch_idx + 1) % lastx == 0:
-                print('%d/%d, avg. reward: %2.4f, loss: %2.4f' %
-                      (batch_idx, len(train_loader), np.mean(rewards[-lastx:]), np.mean(losses[-lastx:])))
+            if (batch_idx + 1) % self.plot_every == 0:
+
+                if not os.path.exists('outputs'):
+                    os.makedirs('outputs')
+                trainset.render(static, tour_indices)
+                plt.savefig('outputs/%d.png' % batch_idx)
+
+                print('%d/%d, avg. reward: %2.4f, loss: %2.4f, took: %2.4fs' %
+                      (batch_idx, len(train_loader),
+                       np.mean(rewards[-self.plot_every:]),
+                       np.mean(losses[-self.plot_every:]), time.time() - start))
+
+        return np.mean(losses)
+
+    def train_multilength(self, trainset, valset, reward_fn, batch_size):
+        """
+        Procedure
+        ---------
+        1. Calculate an embedding for static & dynamic elements
+        2. Calculate an representation of the last decoder output
+        3. Calculate an attention vector
+        4. Blend the attention and static embeddings to get a context vector
+        5. Calculate a new output via context vector & static embeddings
+        6. Update data for the chosen dynamic element & compute new embedding
+        """
+
+        train_loader = DataLoader(trainset, batch_size, True, num_workers=0)
+        valid_loader = DataLoader(valset, 1, False, num_workers=0)
+
+        # (Possibly) use a mask to speed up training
+        mask_fn = getattr(trainset, 'update_mask', None)
+        update_fn = getattr(trainset, 'update_dynamic', None)
+
+        critic_ema = torch.zeros(1)
+        if self.use_cuda:
+            critic_ema = critic_ema.cuda()
+
+        losses, rewards = [], []
+        for batch_idx, batch in enumerate(train_loader):
+
+            start = time.time()
+
+            static = Variable(batch[0])
+            dynamic = Variable(batch[1])
+            initial_state = Variable(batch[2]) if len(batch[2]) > 0 else None
+
+            tour_indices, tour_probs, reward = [], [], []
+
+            # for static_, dynamic_, state_ in zip(static, dynamic, initial_state):
+            for i in range(len(static)):
+
+                state = None if initial_state is None else initial_state[i:i + 1]
+                idx, prob = self.forward(static[i:i + 1],
+                                         dynamic[i:i + 1],
+                                         state,
+                                         update_fn, mask_fn)
+                tour_indices.append(idx)
+                tour_probs.append(torch.log(prob).sum())
+                reward.append(reward_fn(static[i:i + 1], idx, self.use_cuda).sum(1))
+
+            logp_tour = torch.cat(tour_probs)
+            reward = torch.cat(reward)
+
+            # Update the network
+            if batch_idx == 0:
+                critic_ema = reward.mean()
+            else:
+                beta = self.critic_beta
+                critic_ema = (critic_ema * beta) + (1. - beta) * reward.mean()
+
+            advantage = (reward - critic_ema)
+
+            # Sum the log probabilities for each city in the tour
+            actor_loss = torch.mean(advantage * logp_tour)
+
+            self.optimizer.zero_grad()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm(self.parameters(), self.max_grad_norm, norm_type=2)
+            self.optimizer.step()
+
+            critic_ema = critic_ema.detach()
+
+            # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
+            rewards.append(reward.mean().data.numpy())
+            losses.append(actor_loss.data.numpy())
+            if (batch_idx + 1) % self.plot_every == 0:
+
+                if not os.path.exists('outputs'):
+                    os.makedirs('outputs')
+
+                trainset.render(static, tour_indices)
+                plt.savefig('outputs/%d.png' % batch_idx)
+
+                print('%d/%d, avg. reward: %2.4f, loss: %2.4f, took: %2.4fs' %
+                      (batch_idx, len(train_loader),
+                       np.mean(rewards[-self.plot_every:]),
+                       np.mean(losses[-self.plot_every:]), time.time() - start))
 
         return np.mean(losses)
 
 
-# "After visiting customer node i, the demands and vehicle load are updated as:
-# d_{t+1}^i = max(0, d_t^i - l_t)
-# d_{t+1}^k = d_t^k     for k != i
-# l_{t+1} = max(0, l_t - d_t^i)
 if __name__ == '__main__':
-
-    from utils import gen_dataset
-    from torch.utils.data import DataLoader
-
-    task = 'tsp_20'
-    train_size = 100000
-    val_size = 1000
-    batch_size = 64
-    static_size = 2
-    dynamic_size = 1
-    hidden_size = 128
-    dropout = 0.3
-    use_cuda = False
-    num_layers = 1
-    critic_beta = 0.9
-    max_grad_norm = 2.
-    actor_lr = 1e-3
-    actor_decay_step = 5000
-    actor_decay_rate = 0.96
-
-    '''
-    a = Variable(torch.FloatTensor([[5]]), requires_grad=True)
-    b = Variable(torch.FloatTensor([[1]]), requires_grad=True)
-    print(id(a), id(b), id(a + b))
-    import sys
-    sys.exit(1)
-    '''
-
-    model = DRL4VRP(static_size, dynamic_size, hidden_size, dropout,
-                    num_layers, critic_beta, max_grad_norm,
-                    actor_lr, actor_decay_step, actor_decay_rate, use_cuda)
-
-    for epoch in range(100):
-        model.train(task, train_size, val_size, batch_size)
+    raise Exception('Cannot be called from main')
