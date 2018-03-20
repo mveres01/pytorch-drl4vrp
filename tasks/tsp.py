@@ -5,17 +5,27 @@
 
 #  NOTE: File from: https://github.com/pemami4911/neural-combinatorial-rl-pytorch/blob/master/tsp_task.py
 
+import time
 import requests
 from tqdm import tqdm
-from torch.utils.data import Dataset
-from torch.autograd import Variable
-import torch
 import os
 import numpy as np
 import re
 import zipfile
 import itertools
 from collections import namedtuple
+import torch
+import torch.optim as optim
+from torch.autograd import Variable
+from torch.utils.data import Dataset, DataLoader
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+import sys
+sys.path.append('..')
+from model import DRL4VRP, Critic
+from utils import gen_dataset
 
 #######################################
 # Functions for downloading dataset
@@ -212,13 +222,11 @@ class TSPDataset(Dataset):
         Euclidean distance between consecutive nodes on the route of size (batch_size, seq_len)
         """
 
-        assert all(len(a) == len(np.unique(a)) for a in tour_indices)
-
         # Convert the indices back into a tour
         idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
         tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
 
-        x = Variable(tour)
+        x = tour.cuda() if use_cuda else tour
 
         # Make a full tour by returning to the start
         y = torch.cat((x, x[:, 0:1]), dim=1)
@@ -226,11 +234,10 @@ class TSPDataset(Dataset):
         # Euclidean distance between each consecutive point
         tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
-        return tour_len
+        return Variable(tour_len)
 
     @staticmethod
-    def render(static, tour_indices):
-        import matplotlib.pyplot as plt
+    def render(static, tour_indices, save_path):
 
         plt.close('all')
 
@@ -244,47 +251,11 @@ class TSPDataset(Dataset):
                 idx = idx.unsqueeze(0)
 
             idx = idx.expand(static.size(1), -1)
-            data = torch.gather(static[i].data, 1, idx).numpy()
+            data = torch.gather(static[i].data, 1, idx).cpu().numpy()
 
             plt.subplot(num_plots, num_plots, i + 1)
-            plt.plot(data[0], data[1])
-            plt.scatter(data[0], data[1], s=4, c='r')
+            plt.plot(data[0], data[1], zorder=1)
+            plt.scatter(data[0], data[1], s=4, c='r', zorder=2)
 
         plt.tight_layout()
-
-
-if __name__ == '__main__':
-
-    import sys
-    sys.path.append('..')
-    from model import DRL4VRP
-    from utils import gen_dataset
-
-    task = 'tsp_20'
-    train_size = 100000
-    val_size = 1000
-    batch_size = 64
-    static_size = 2
-    dynamic_size = 1
-    hidden_size = 128
-    dropout = 0.2
-    use_cuda = False
-    num_layers = 1
-    critic_beta = 0.9
-    max_grad_norm = 2.
-    actor_lr = 1e-3
-    actor_decay_step = 5000
-    actor_decay_rate = 0.96
-    plot_every = 10
-
-    model = DRL4VRP(static_size, dynamic_size, hidden_size, dropout,
-                    num_layers, critic_beta, max_grad_norm,
-                    actor_lr, actor_decay_step, actor_decay_rate,
-                    plot_every, use_cuda)
-
-    for epoch in range(100):
-
-        _, train, valid = gen_dataset(task, train_size, val_size)
-
-        reward_fn = train.reward
-        model.train(train, valid, reward_fn, batch_size)
+        plt.savefig(save_path, bbox_inches='tight', dpi=400)
