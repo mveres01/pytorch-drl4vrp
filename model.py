@@ -43,27 +43,15 @@ class Attention(nn.Module):
 
     def forward(self, static_enc, dynamic_enc, decoder_hidden):
 
-        batch_size, _, seq_len = static_enc.size()
+        # We apply attention using static, dynamic, and decoder output features
+        hidden = decoder_hidden.permute(1, 2, 0).expand_as(static_enc)
+        energy = torch.cat((static_enc, dynamic_enc, hidden), dim=1)
 
-        # Attention is calculated across the input sequence, and is a function
-        # and is a function of static, dynamic, and output elements
-        attns = torch.zeros(batch_size, seq_len)
-        if self.use_cuda:
-            attns = Variable(attns.cuda())
-        else:
-            attns = Variable(attns)
+        v_view = self.v.unsqueeze(0).expand(static_enc.size(0), -1, -1)
+        W_view = self.W.unsqueeze(0).expand(static_enc.size(0), -1, -1)
 
-        # (batch_size, num_feats, seq_len)
-        hidden = decoder_hidden.permute(1, 2, 0).expand(-1, -1, seq_len)
-
-        for i in range(batch_size):
-
-            # ([static, dynamic, output]_feats, seq_len)
-            energy = torch.cat((static_enc[i], dynamic_enc[i], hidden[i]), 0)
-
-            attns[i] = torch.mm(self.v, F.tanh(torch.mm(self.W, energy)))
-
-        attns = F.softmax(attns, dim=1)  # (batch, seq_len)
+        attns = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
+        attns = F.softmax(attns, dim=2)  # (batch, seq_len)
         return attns
 
 
@@ -105,19 +93,19 @@ class Decoder(nn.Module):
         rnn_out, hidden = self.gru(last_embedding, last_hidden)
 
         # Attention is applied across the static and dynamic states of the input
-        attn = self.attn(static_enc, dynamic_enc, rnn_out).unsqueeze(1)
+        attn = self.attn(static_enc, dynamic_enc, rnn_out)  # (B, 1, seq_len)
 
         # The context vector is a weighted combination of the attention + inputs
         context = attn.bmm(static_enc.permute(0, 2, 1))  # (B, 1, num_feats)
 
         # Calculate the next output using Batch-matrix-multiply ops
-        context = context.permute(0, 2, 1).expand(-1, -1, seq_len)
-        context = torch.cat((static_enc, context), dim=1)
+        context = context.squeeze(1).unsqueeze(2).expand_as(static_enc)
+        energy = torch.cat((static_enc, context), dim=1)  # (B, num_feats, seq_len)
 
         W_view = self.W.unsqueeze(0).expand(batch_size, -1, -1)
         v_view = self.v.unsqueeze(0).expand(batch_size, -1, -1)
 
-        outputs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, context)))
+        outputs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
         outputs = outputs.squeeze(1)
 
         return outputs, hidden
@@ -148,19 +136,26 @@ class Critic(nn.Module):
         static_enc = self.static_encoder(static)
         dynamic_enc = self.dynamic_encoder(dynamic)
 
+        batch_size, num_feats, _ = static_enc.size()
+
         if initial_state is None:
-            # Use a zero'd context vector
-            context = torch.zeros(1, static_enc.size(0), static_enc.size(1))
-            context = Variable(context.cuda() if self.use_cuda else context)
+            # Use an empty context vector
+            if self.use_cuda:
+                x0 = torch.cuda.FloatTensor(1, batch_size, num_feats).fill_(0)
+            else:
+                x0 = torch.FloatTensor(1, batch_size, num_feats).fill_(0)
+            context = Variable(x0)
         else:
             # Pass initial state through an encoder
-            context = self.static_encoder(initial_state.unsqueeze(2)).permute(2, 0, 1)
+            context = self.static_encoder(initial_state.unsqueeze(2))
+            context = context.permute(2, 0, 1)
 
+        static_p = static_enc.permute(0, 2, 1)
         for _ in range(self.num_process_iter):
 
             # Attention is applied across the static and dynamic states
-            attn = self.attn(static_enc, dynamic_enc, context).unsqueeze(1)
-            context[0] = attn.bmm(static_enc.permute(0, 2, 1)).squeeze(1)
+            attn = self.attn(static_enc, dynamic_enc, context)  # (B, 1, Seq)
+            context[0] = attn.bmm(static_p).squeeze(1)
 
         output = F.relu(self.fc1(context.squeeze(0)))
         output = self.fc2(output)
@@ -201,15 +196,18 @@ class DRL4VRP(nn.Module):
         """
 
         # Structures for holding the output sequences
-        decoder_probs, decoder_indices = [], []
+        decoder_logp, decoder_indices = [], []
 
         max_iters = static.size(2) if self.mask_fn is None else 1000
 
-        mask = torch.ones(static.size(0), static.size(2))
-        mask = Variable(mask.cuda() if self.use_cuda else mask)
+        if self.use_cuda:
+            mask = torch.cuda.FloatTensor(static.size(0), static.size(2)).fill_(1)
+        else:
+            mask = torch.FloatTensor(static.size(0), static.size(2)).fill_(1)
+        mask = Variable(mask)
 
-        static_enc = self.static_encoder(static)
-        dynamic_enc = self.dynamic_encoder(dynamic)
+        static_enc = self.static_encoder(static)  # (B, num_feats, seq_len)
+        dynamic_enc = self.dynamic_encoder(dynamic)  # (B, num_feats, seq_len)
 
         for _ in range(max_iters):
 
@@ -218,20 +216,21 @@ class DRL4VRP(nn.Module):
 
             # Use mask.log() to prevent certain indices from being selected. From:
             # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
-            probs = F.softmax(probs + mask.log(), dim=1)
+            probs = F.softmax(probs + 1e-6 + mask.log(), dim=1)
 
             # When training we sample the next state, but for testing use greedy
             if self.training:
-                ptr = torch.distributions.Categorical(probs).sample()
+                m = torch.distributions.Categorical(probs)
+                ptr = m.sample()
+                prob = m.log_prob(ptr)
             else:
-                ptr = torch.max(probs, 1)[1]
+                prob, ptr = torch.max(probs, 1)
 
             view = ptr.view(-1, 1, 1).expand(-1, static.size(1), -1)
-            last_output = torch.gather(static, 2, view).clone().squeeze(2)
+            last_output = torch.gather(static, 2, view).squeeze(2)
 
             # Keep track of the probability we used in selecting the action
-            top_prob = probs[np.arange(static.size(0)), ptr.data]
-            decoder_probs.append(top_prob.unsqueeze(1))
+            decoder_logp.append(prob.unsqueeze(1))
             decoder_indices.append(ptr.data.unsqueeze(1))
 
             # Update the dynamics variables
@@ -246,9 +245,9 @@ class DRL4VRP(nn.Module):
                     break
 
         # (batch_size, seq_len)
-        decoder_probs = torch.cat(decoder_probs, dim=1)
+        decoder_logp = torch.cat(decoder_logp, dim=1)
         decoder_indices = torch.cat(decoder_indices, dim=1)
-        return decoder_indices, decoder_probs
+        return decoder_indices, decoder_logp
 
 
 if __name__ == '__main__':

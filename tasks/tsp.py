@@ -223,18 +223,17 @@ class TSPDataset(Dataset):
         """
 
         # Convert the indices back into a tour
-        idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
+        idx = tour_indices.unsqueeze(1).expand_as(static)
+
         tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
 
-        x = tour.cuda() if use_cuda else tour
-
         # Make a full tour by returning to the start
-        y = torch.cat((x, x[:, 0:1]), dim=1)
+        y = torch.cat((tour, tour[:, 0:1]), dim=1)
 
         # Euclidean distance between each consecutive point
         tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
-        return Variable(tour_len)
+        return Variable(tour_len).sum(1)
 
     @staticmethod
     def render(static, tour_indices, save_path):

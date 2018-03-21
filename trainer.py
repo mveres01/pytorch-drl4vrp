@@ -35,7 +35,7 @@ class NeuralCombinatorialSolver(object):
 
     def _multipass(self, static, dynamic, initial_state):
 
-        tour_indices, tour_probs, tour_reward = [], [], []
+        tour_indices, tour_logp, tour_reward = [], [], []
 
         # Because the VRP can have tours with different numbers of visits,
         # we'll process each sample individually (using the same parameters)
@@ -44,35 +44,33 @@ class NeuralCombinatorialSolver(object):
 
             state = None if initial_state is None else initial_state[i:i + 1]
 
-            idx, prob = self.actor.forward(static[i:i + 1],
+            idx, logp = self.actor.forward(static[i:i + 1],
                                            dynamic[i:i + 1],
                                            state)
-
-            logp_tour = torch.log(prob).sum()
 
             reward = self.reward_fn(static[i:i + 1], idx, self.use_cuda)
 
             tour_indices.append(idx)
-            tour_probs.append(logp_tour)
+            tour_logp.append(logp.sum())
             tour_reward.append(reward.sum(1))
 
         # Sum the log probabilities for each city in the tour
-        logp_tour = torch.cat(tour_probs)
+        tour_logp = torch.cat(tour_logp)
         tour_reward = torch.cat(tour_reward)
 
-        return tour_indices, logp_tour, tour_reward
+        return tour_indices, tour_logp, tour_reward
 
     def _singlepass(self, static, dynamic, initial_state):
 
         # Full forward pass through the dataset
-        tour_indices, tour_probs = self.actor.forward(static, dynamic,
-                                                      initial_state)
+        tour_indices, tour_logp = self.actor.forward(static, dynamic,
+                                                     initial_state)
 
         # Sum the log probabilities for each city in the tour
-        logp_tour = torch.log(tour_probs).sum(1)
-        tour_reward = self.reward_fn(static, tour_indices, self.use_cuda).sum(1)
+        tour_logp = tour_logp.sum(1)
+        tour_reward = self.reward_fn(static, tour_indices, self.use_cuda)
 
-        return tour_indices, logp_tour, tour_reward
+        return tour_indices, tour_logp, tour_reward
 
     def solve(self, static, dynamic, initial_state):
 
@@ -95,8 +93,9 @@ class NeuralCombinatorialSolver(object):
 
             start = time.time()
 
-            static = Variable(batch[0] if not self.use_cuda else batch[0].cuda())
-            dynamic = Variable(batch[1] if not self.use_cuda else batch[1].cuda())
+            static = Variable(batch[0].cuda() if self.use_cuda else batch[0])
+            dynamic = Variable(batch[1].cuda() if self.use_cuda else batch[1])
+
             if len(batch[2]) > 0:
                 if self.use_cuda:
                     initial_state = Variable(batch[2].cuda())
@@ -132,17 +131,16 @@ class NeuralCombinatorialSolver(object):
             critic_optimizer.step()
 
             # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
-            rewards.append(np.mean(reward.cpu().data.numpy()))
-            losses.append(actor_loss.cpu().data.numpy())
+            rewards.append(torch.mean(reward.data))
+            losses.append(torch.mean(actor_loss.data))
             if (batch_idx + 1) % self.plot_every == 0:
 
-                save_path = os.path.join(self.save_dir, '%d.png' % batch_idx)
-                self.render_fn(static, tour_indices, save_path)
+                mean_loss = np.mean(losses[-self.plot_every:])
+                mean_reward = np.mean(rewards[-self.plot_every:])
 
                 print('%d/%d, avg. reward: %2.4f, loss: %2.4f, took: %2.4fs' %
                       (batch_idx, len(data_loader),
-                       np.mean(rewards[-self.plot_every:]),
-                       np.mean(losses[-self.plot_every:]), time.time() - start))
+                       mean_reward, mean_loss, time.time() - start))
 
             if (batch_idx + 1) % self.checkpoint_every == 0:
 
@@ -156,7 +154,13 @@ class NeuralCombinatorialSolver(object):
                 save_path = os.path.join(self.checkpoint_dir, fname)
                 torch.save(self.critic.state_dict(), save_path)
 
-        return np.mean(rewards), np.mean(losses)
+                save_path = os.path.join(self.save_dir, '%d.png' % batch_idx)
+                self.render_fn(static, tour_indices, save_path)
+
+        mean_loss = np.mean(losses[-self.plot_every:])
+        mean_reward = np.mean(rewards[-self.plot_every:])
+
+        return mean_reward, mean_loss
 
 
 def train_tsp():
@@ -165,13 +169,13 @@ def train_tsp():
     # TSP50, 5.70  (Optimal) - 6.08  (DRL4VRP)
     # TSP100, 7.77 (OptimalBS) - 8.44 (DRL4VRP)
 
-    task = 'tsp_10'
+    task = 'tsp_50'
     save_dir = 'tsp_outputs/%s' % task
 
     batch_mode = 'single'
     train_size = 1000000
     val_size = 1000
-    batch_size = 64
+    batch_size = 128
     num_process_iter = 1
     static_size = 2
     dynamic_size = 1
@@ -182,15 +186,15 @@ def train_tsp():
     max_grad_norm = 2.
     actor_lr = 1e-3
     critic_lr = actor_lr
-    plot_every = 50
-    checkpoint_every = 500
+    plot_every = 10
+    checkpoint_every = 250
 
     _, train_data, valid_data = gen_dataset(task, train_size, val_size)
     train_loader = DataLoader(train_data, batch_size, True, num_workers=0)
     valid_loader = DataLoader(valid_data, 1, False, num_workers=0)
 
     mask_fn = train_data.update_mask
-    update_fn = None  # train_data.update_dynamic
+    update_fn = None
     reward_fn = train_data.reward
     render_fn = train_data.render
 
