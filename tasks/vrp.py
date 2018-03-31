@@ -36,7 +36,7 @@ class VehicleRoutingDataset(Dataset):
         demands = demands / float(max_load)
 
         # The depot will be used to refill the vehicle with the initial load
-        demands[:, 0, 0] = -loads[:, 0, 0]
+        demands[:, 0, 0] = 0
         self.dynamic = torch.FloatTensor(np.concatenate((loads, demands), axis=1))
 
     def __len__(self):
@@ -56,44 +56,88 @@ class VehicleRoutingDataset(Dataset):
         dynamic: torch.autograd.Variable of size (1, num_feats, seq_len)
         """
 
-        assert mask.shape[0] == dynamic.shape[0] == 1
+        if dynamic.is_cuda:
+            home = torch.cuda.FloatTensor(1, mask.size(1)).fill_(0)
+        else:
+            home = torch.FloatTensor(1, mask.size(1)).fill_(0)
+        home[0, 0] = 1
 
         dynamic_int = (dynamic.data * self.max_load).int()
 
         # Nodes with 0-demand cannot be chosen
-        mask = dynamic_int[:, 1] > 0
+        demand_mask = dynamic_int[:, 1].ne(0).float()
 
-        if not mask[0:, 1:].byte().any():  # no demand, terminate search
-            mask = torch.zeros_like(mask)
-        elif dynamic_int[0, 0, 0] <= 0:  # vehicle has no load -> refill
-            mask = torch.zeros_like(mask)
-            mask[:, 0] = 1
-        return Variable(mask.float())
+        # If there's no demand left, terminate search
+        if not demand_mask[:, 1:].byte().any():
+            return demand_mask * 0.
+
+        has_no_load = dynamic_int[:, 0, 0].eq(0).float()
+        has_no_demand = demand_mask[:, 1:].sum(1).eq(0).float()
+
+        # If a vehicle has no load or demand, force it to stay at the depot
+        combined = (has_no_load + has_no_demand).gt(0)
+        if combined.byte().any():
+            idx = combined.nonzero().squeeze()
+            demand_mask[idx] = home.expand(int(combined.sum()), -1)
+
+        # Don't let the vehicle visit the depot back-to-back
+        has_any_demand = dynamic_int[:, 1, 1:].gt(0).sum(1).float()
+        has_full_load = dynamic_int[:, 0, 0].eq(self.max_load).float()
+
+        # Don't let it go home if we have a full load and there is demand remaining
+        combined = (has_full_load * has_any_demand).gt(0)
+        if combined.byte().any():
+            idx = combined.nonzero().squeeze()
+            demand_mask[idx] *= (1 - home).expand(int(combined.sum()), -1)
+
+        return demand_mask
 
     def update_dynamic(self, dynamic_var, chosen_idx):
 
-        to_update = chosen_idx[0]
-
         # Clone the dynamic variable so we don't mess up graph
-        dynamic = dynamic_var.clone()
+        tensor = dynamic_var.data.clone()
+        all_loads = tensor[:, 0]
+        all_demands = tensor[:, 1]
 
-        # Agent chooses to return to the depot, so we reset the 'vehicle load'
-        # for each dynamic element to be the original capacity
-        if to_update == 0:
-            dynamic.data[0, 0, :] = -dynamic.data[0, 1, 0]
-        else:
-            dint = (dynamic.data * self.max_load).int()
+        # Visit a node other then the depot; Do operations on all elements, and
+        # only update those we actually visited at the end
+        visit = chosen_idx.ne(0)
+        depot = chosen_idx.eq(0)
 
-            load = dint[0, 0, to_update]
-            demand = dint[0, 1, to_update]
+        load = torch.gather(all_loads, 1, chosen_idx.unsqueeze(1))
+        demand = torch.gather(all_demands, 1, chosen_idx.unsqueeze(1))
 
-            load_t = np.maximum(0, load - demand) / self.max_load
-            demand_t = np.maximum(0, demand - load) / self.max_load
+        if visit.any():
 
-            dynamic.data[0, 0, :] = load_t
-            dynamic.data[0, 1, to_update] = demand_t
+            # Calculate the change in load / demand across ALL of the chosen
+            # nodes this round;
+            load_int = (load * self.max_load).int().float()
+            demand_int = (demand * self.max_load).int().float()
 
-        return dynamic
+            load_t = torch.clamp(load_int - demand_int, min=0) / self.max_load
+            load_t = load_t.expand(-1, tensor.size(2))
+
+            demand_ = torch.clamp(demand_int - load_int, min=0) / self.max_load
+            demand_t = demand.masked_scatter_(visit.unsqueeze(1), demand_.squeeze(1))
+
+            visit_idx = visit.nonzero().squeeze()
+            all_loads[visit_idx] = load_t[visit_idx]  # Broadcast load update
+            all_demands.scatter_(1, chosen_idx.unsqueeze(1), demand_t)  # Update idx
+
+            # Update the amount of material we could pick up by visiting the depot
+            visit = visit.float()
+            all_demands[:, 0] = all_demands[:, 0] * (1 - visit) + (load_t[:, 0] - 1) * visit
+
+        # Return to depot to fill vehicle load
+        if depot.any():
+            all_loads[depot.nonzero().squeeze()] = 1.
+
+            # If we visit the depot, we refill the vehicle and have 0 demand to
+            # immediately visit it again
+            all_demands[:, 0] = all_demands[:, 0] * (1. - depot.float())
+
+        tensor = torch.cat((all_loads.unsqueeze(1), all_demands.unsqueeze(1)), 1)
+        return Variable(tensor)
 
     @staticmethod
     def reward(static, tour_indices, use_cuda=False):
@@ -101,21 +145,20 @@ class VehicleRoutingDataset(Dataset):
         Function of: tour_length + number_passengers
         """
 
-        dummy = torch.FloatTensor([0])
-        tour_len = Variable(dummy.cuda() if use_cuda else dummy)
+        # Convert the indices back into a tour
+        idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
 
-        # Start at the depot
-        prev_loc = static[0, : 2, 0]
-        for idx in tour_indices[0]:
+        tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
 
-            cur_loc = static[0, : 2, idx]
-            tour_len = tour_len + torch.sqrt(torch.sum(torch.pow(prev_loc - cur_loc, 2)))
-            prev_loc = cur_loc
+        start = static.data[:, :, 0].unsqueeze(1)
 
-        # End at the depot
-        tour_len = tour_len + torch.sqrt(torch.sum(torch.pow(prev_loc - static[0, : 2, 0], 2)))
+        # Make a full tour by returning to the start
+        y = torch.cat((start, tour, start), dim=1)
 
-        return tour_len.unsqueeze(0)
+        # Euclidean distance between each consecutive point
+        tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
+
+        return Variable(tour_len).sum(1)
 
     @staticmethod
     def render(static, tour_indices, save_path):
@@ -132,23 +175,27 @@ class VehicleRoutingDataset(Dataset):
                 idx = idx.unsqueeze(0)
 
             idx = idx.expand(static.size(1), -1)
-            data = torch.gather(static[i].data, 1, idx).numpy()
+            data = torch.gather(static[i].data, 1, idx).cpu().numpy()
 
-            start = static[i, :, 0].data.numpy()
+            start = static[i, :, 0].cpu().data.numpy()
             x = np.hstack((start[0], data[0], start[0]))
             y = np.hstack((start[1], data[1], start[1]))
 
             plt.subplot(num_plots, num_plots, i + 1)
 
             # Assign each subtour a different colour & label in order traveled
-            idx = np.hstack((0, idx.numpy().flatten(), 0))
+            idx = np.hstack((0, tour_indices[i].cpu().numpy().flatten(), 0))
             where = np.where(idx == 0)[0]
             count = 0
+
             for j in range(len(where) - 1):
 
                 count += 1
                 low = where[j]
                 high = where[j + 1]
+
+                if low + 1 == high:
+                    continue
 
                 plt.plot(x[low: high + 1], y[low: high + 1], zorder=1, label=count)
 

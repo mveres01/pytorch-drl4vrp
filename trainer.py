@@ -1,4 +1,5 @@
 import os
+import gc
 import time
 import numpy as np
 import torch
@@ -7,8 +8,7 @@ from torch.autograd import Variable
 from torch.utils.data import DataLoader
 
 from utils import gen_dataset
-from model import DRL4VRP, Critic
-from tasks.vrp import VehicleRoutingDataset
+from model import DRL4TSP, DRL4VRP, Critic
 
 
 class NeuralCombinatorialSolver(object):
@@ -33,45 +33,6 @@ class NeuralCombinatorialSolver(object):
         if not os.path.exists(self.checkpoint_dir):
             os.makedirs(self.checkpoint_dir)
 
-    def _multipass(self, static, dynamic, initial_state):
-
-        tour_indices, tour_logp, tour_reward = [], [], []
-
-        # Because the VRP can have tours with different numbers of visits,
-        # we'll process each sample individually (using the same parameters)
-        # and then combine / update the network using the mean signal
-        for i in range(len(static)):
-
-            state = None if initial_state is None else initial_state[i:i + 1]
-
-            idx, logp = self.actor.forward(static[i:i + 1],
-                                           dynamic[i:i + 1],
-                                           state)
-
-            reward = self.reward_fn(static[i:i + 1], idx, self.use_cuda)
-
-            tour_indices.append(idx)
-            tour_logp.append(logp.sum())
-            tour_reward.append(reward.sum(1))
-
-        # Sum the log probabilities for each city in the tour
-        tour_logp = torch.cat(tour_logp)
-        tour_reward = torch.cat(tour_reward)
-
-        return tour_indices, tour_logp, tour_reward
-
-    def _singlepass(self, static, dynamic, initial_state):
-
-        # Full forward pass through the dataset
-        tour_indices, tour_logp = self.actor.forward(static, dynamic,
-                                                     initial_state)
-
-        # Sum the log probabilities for each city in the tour
-        tour_logp = tour_logp.sum(1)
-        tour_reward = self.reward_fn(static, tour_indices, self.use_cuda)
-
-        return tour_indices, tour_logp, tour_reward
-
     def solve(self, static, dynamic, initial_state):
 
         static_var = Variable(static)
@@ -91,25 +52,26 @@ class NeuralCombinatorialSolver(object):
         losses, rewards = [], []
         for batch_idx, batch in enumerate(data_loader):
 
+            gc.collect()
             start = time.time()
 
             static = Variable(batch[0].cuda() if self.use_cuda else batch[0])
             dynamic = Variable(batch[1].cuda() if self.use_cuda else batch[1])
 
             if len(batch[2]) > 0:
+                initial_state = batch[2]
                 if self.use_cuda:
-                    initial_state = Variable(batch[2].cuda())
-                else:
-                    initial_state = Variable(batch[2])
+                    initial_state = initial_state.cuda()
+                initial_state = Variable(initial_state)
             else:
                 initial_state = None
 
-            if self.batch_mode == 'single':
-                tour_indices, logp_tour, reward = \
-                    self._singlepass(static, dynamic, initial_state)
-            else:
-                tour_indices, logp_tour, reward = \
-                    self._multipass(static, dynamic, initial_state)
+            # Full forward pass through the dataset
+            tour_indices, logp_tour = self.actor.forward(static, dynamic,
+                                                         initial_state)
+
+            # Sum the log probabilities for each city in the tour
+            reward = self.reward_fn(static, tour_indices, self.use_cuda)
 
             # Query the critic for an estimate of the reward
             critic_est = self.critic(static, dynamic, initial_state).view(-1)
@@ -169,27 +131,31 @@ def train_tsp():
     # TSP50, 5.70  (Optimal) - 6.08  (DRL4VRP)
     # TSP100, 7.77 (OptimalBS) - 8.44 (DRL4VRP)
 
-    task = 'tsp_50'
-    save_dir = 'tsp_outputs/%s' % task
+    from tasks.tsp import TSPDataset
+
+    num_nodes = 10
+    save_dir = 'tsp_outputs/tsp_%s' % num_nodes
 
     batch_mode = 'single'
     train_size = 1000000
     val_size = 1000
-    batch_size = 128
-    num_process_iter = 1
+    batch_size = 64
+    num_process_iter = 3
     static_size = 2
     dynamic_size = 1
     hidden_size = 128
     dropout = 0.2
     use_cuda = torch.cuda.is_available()
-    num_layers = 2
+    num_layers = 1
     max_grad_norm = 2.
     actor_lr = 1e-3
     critic_lr = actor_lr
     plot_every = 10
     checkpoint_every = 250
 
-    _, train_data, valid_data = gen_dataset(task, train_size, val_size)
+    train_data = TSPDataset(size=num_nodes, num_samples=train_size)
+    valid_data = TSPDataset(size=num_nodes, num_samples=val_size)
+
     train_loader = DataLoader(train_data, batch_size, True, num_workers=0)
     valid_loader = DataLoader(valid_data, 1, False, num_workers=0)
 
@@ -198,7 +164,7 @@ def train_tsp():
     reward_fn = train_data.reward
     render_fn = train_data.render
 
-    actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn, mask_fn,
+    actor = DRL4TSP(static_size, dynamic_size, hidden_size, update_fn, mask_fn,
                     dropout, num_layers, use_cuda)
 
     critic = Critic(static_size, dynamic_size, hidden_size, num_process_iter, use_cuda)
@@ -219,31 +185,33 @@ def train_tsp():
 
 def train_vrp():
 
+    from tasks.vrp import VehicleRoutingDataset
+
     # VRP10, Capacity 20:  4.65  (BS) - 4.80  (Greedy)
     # VRP20, Capacity 30:  6.34  (BS) - 6.51  (Greedy)
     # VRP50, Capacity 40:  11.08 (BS) - 11.32 (Greedy)
     # VRP100, Capacity 50: 16.86 (BS) - 17.12 (Greedy)
-    batch_mode = 'multipass'
-    num_nodes = 20
+    batch_mode = 'single'
+    num_nodes = 10
     max_demand = 9
-    max_load = 30
+    max_load = 20
+    batch_size = 128
     save_dir = 'vrp_outputs/%d_%d_%d' % (num_nodes, max_demand, max_load)
 
     max_grad_norm = 2.
-    actor_lr = 5e-4
+    actor_lr = 1e-3
     critic_lr = actor_lr
     train_size = 1000000
     val_size = 1000
-    batch_size = 64
     static_size = 2
     dynamic_size = 2
     hidden_size = 128
-    dropout = 0.1
+    dropout = 0.2
     num_layers = 1
-    num_process_iter = 3
+    num_process_iter = 2
 
     plot_every = 10
-    checkpoint_every = 500
+    checkpoint_every = 250
     use_cuda = torch.cuda.is_available()
 
     train_data = VehicleRoutingDataset(train_size, num_nodes, max_load, max_demand)
@@ -277,5 +245,5 @@ def train_vrp():
 
 
 if __name__ == '__main__':
-    # train_vrp()
-    train_tsp()
+    train_vrp()
+    # train_tsp()

@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,45 +9,34 @@ class Encoder(nn.Module):
 
     def __init__(self, input_size, hidden_size):
         super(Encoder, self).__init__()
-
-        # Use a 1d CNN to embed both the static & dynamic elements
         self.conv = nn.Conv1d(input_size, hidden_size, kernel_size=1)
-
-        for p in self.parameters():
-            if len(p.shape) > 1:
-                nn.init.xavier_uniform(p)
 
     def forward(self, input):
 
-        # (batch_size, input_features, seq_len) -> (batch_size, hidden_size, seq_len)
-        output = self.conv(input)
+        output = self.conv(input)  # (batch, in, seq_len) -> (batch, out, seq_len)
         return output
 
 
 class Attention(nn.Module):
     """Calculates attention over the input nodes given the current state."""
 
-    def __init__(self, hidden_size, use_cuda=False):
+    def __init__(self, hidden_size):
         super(Attention, self).__init__()
 
-        # The static, dynamic, and hidden (from decoder) all have the same size
+        # W processes features from static, dynamic and decoder elements
         self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
         self.W = nn.Parameter(torch.FloatTensor(hidden_size, 3 * hidden_size))
 
-        for p in self.parameters():
-            if len(p.shape) > 1:
-                nn.init.xavier_uniform(p)
-
-        self.use_cuda = use_cuda
-
     def forward(self, static_enc, dynamic_enc, decoder_hidden):
 
-        # We apply attention using static, dynamic, and decoder output features
+        batch_size, hidden_size, _ = static_enc.size()
+
+        # Energy shape is: (batch, total_num_feats, seq_len)
         hidden = decoder_hidden.permute(1, 2, 0).expand_as(static_enc)
         energy = torch.cat((static_enc, dynamic_enc, hidden), dim=1)
 
-        v_view = self.v.unsqueeze(0).expand(static_enc.size(0), -1, -1)
-        W_view = self.W.unsqueeze(0).expand(static_enc.size(0), -1, -1)
+        v_view = self.v.unsqueeze(0).expand(batch_size, 1, hidden_size)
+        W_view = self.W.unsqueeze(0).expand(batch_size, hidden_size, -1)
 
         attns = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
         attns = F.softmax(attns, dim=2)  # (batch, seq_len)
@@ -58,7 +46,7 @@ class Attention(nn.Module):
 class Decoder(nn.Module):
     """Calculates the next state given the previous state and input embeddings."""
 
-    def __init__(self, output_size, hidden_size, dropout=0.2, num_layers=1, use_cuda=False):
+    def __init__(self, output_size, hidden_size, dropout=0.2, num_layers=1):
         super(Decoder, self).__init__()
 
         # Use a learnable initial state (x0) & hidden representation (h0), with
@@ -68,20 +56,14 @@ class Decoder(nn.Module):
         self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
         self.W = nn.Parameter(torch.FloatTensor(hidden_size, 2 * hidden_size))
 
-        for p in self.parameters():
-            if len(p.shape) > 1:
-                nn.init.xavier_uniform(p)
-
-        self.use_cuda = use_cuda
-
         # Used to compute a representation of the current decoder output
         self.embedding = nn.Linear(output_size, hidden_size)
         self.gru = nn.GRU(hidden_size, hidden_size, num_layers, dropout=dropout)
-        self.attn = Attention(hidden_size, use_cuda)
+        self.attn = Attention(hidden_size)
 
     def forward(self, static_enc, dynamic_enc, last_output, last_hidden):
 
-        batch_size, _, seq_len = static_enc.size()
+        batch_size, _, _ = static_enc.size()
 
         # Use a learnable hidden state & input for the decoder
         if last_hidden is None:
@@ -97,6 +79,14 @@ class Decoder(nn.Module):
 
         # The context vector is a weighted combination of the attention + inputs
         context = attn.bmm(static_enc.permute(0, 2, 1))  # (B, 1, num_feats)
+
+        """
+        if context.is_cuda:
+           noise = torch.cuda.FloatTensor(*context.size()).normal_(-0.1, 0.1)
+        else:
+           noise = torch.FloatTensor(*context.size()).normal_(-0.1, 0.1)
+        context = context + Variable(noise, requires_grad=False)
+        """
 
         # Calculate the next output using Batch-matrix-multiply ops
         context = context.squeeze(1).unsqueeze(2).expand_as(static_enc)
@@ -123,7 +113,7 @@ class Critic(nn.Module):
         # Define the encoder & decoder models
         self.static_encoder = Encoder(static_size, hidden_size)
         self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
-        self.attn = Attention(hidden_size, use_cuda)
+        self.attn = Attention(hidden_size)
         self.fc1 = nn.Linear(hidden_size, 20)
         self.fc2 = nn.Linear(20, 1)
 
@@ -160,10 +150,117 @@ class Critic(nn.Module):
         output = F.relu(self.fc1(context.squeeze(0)))
         output = self.fc2(output)
 
-        return output
+        return F.elu(output)
+
+
+class DRL4TSP(nn.Module):
+    """Defines the main Encoder + Decoder combinatorial model.
+
+    The TSP is defined by the following traits:
+        1. Each city in the list must be visited once and only once, which sets
+           an upper bound on the number of steps to be performed
+        2. The salesman must return to the original node at the end of the tour
+
+    Variants on this scheme can be introduced, such as:
+        1. Only traveling a subset of the path
+        2. Giving dynamic variables to the cities. By default the city generator
+           assumes a dynamic vector composed of 0's, and we do some slightly 
+           inefficient computations in this case. Improvements could be done to 
+           only use static elements.
+
+    Parameters
+    ----------
+    mask_fn:
+        Defined by the task, and used to speed up learning by preventing certain
+        states from being selected by masking with a probability of -inf.
+
+        See: https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
+
+    """
+
+    def __init__(self, static_size, dynamic_size, hidden_size, update_fn=None,
+                 mask_fn=None, dropout=0., num_layers=1, use_cuda=False):
+        super(DRL4TSP, self).__init__()
+
+        self.update_fn = update_fn
+        self.mask_fn = mask_fn
+        self.use_cuda = use_cuda
+
+        # Define the encoder & decoder models
+        self.static_encoder = Encoder(static_size, hidden_size)
+        self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
+        self.decoder = Decoder(static_size, hidden_size, dropout, num_layers)
+
+        for p in self.parameters():
+            if len(p.shape) > 1:
+                nn.init.xavier_uniform(p)
+
+    def forward(self, static, dynamic, last_output=None, last_hidden=None):
+
+        # Structures for holding the output sequences
+        tour_idx = []
+        tour_logp = []
+
+        if self.use_cuda:
+            mask = torch.cuda.FloatTensor(static.size(0), static.size(2)).fill_(1)
+        else:
+            mask = torch.FloatTensor(static.size(0), static.size(2)).fill_(1)
+
+        # Begin optimization - static is only ever processed once, while dynamic
+        # may be updated on each iteration, depending on the problem
+        static_enc = self.static_encoder(static)
+        dynamic_enc = self.dynamic_encoder(dynamic)
+
+        iter_ = 0
+        while iter_ < static.size(2) and mask.byte().any():
+            iter_ = iter_ + 1
+
+            probs, last_hidden = self.decoder(static_enc, dynamic_enc,
+                                              last_output, last_hidden)
+
+            mask_var = Variable(mask, requires_grad=False)
+            probs = F.softmax(probs + mask_var.log(), dim=1)
+
+            if self.training:
+                # Sample the next state using distribution defined by probs
+                m = torch.distributions.Categorical(probs)
+                ptr = m.sample()
+
+                # Sometimes an issue with Categorical & sampling on GPU;
+                # ensure we're only sampling from indices defined by the mask
+                while not torch.gather(mask, 1, ptr.data.unsqueeze(1)).byte().all():
+                    ptr = m.sample()
+                logp = m.log_prob(ptr)
+            else:
+                prob, ptr = torch.max(probs, 1)  # Greedy
+                logp = prob.log()
+
+            tour_logp.append(logp.unsqueeze(1))
+            tour_idx.append(ptr.data.unsqueeze(1))
+
+            view = ptr.view(-1, 1, 1).expand(-1, static.size(1), -1)
+            last_output = torch.gather(static, 2, view).squeeze(2)
+
+            if self.update_fn is not None:
+                dynamic = self.update_fn(dynamic, ptr.data)
+                dynamic_enc = self.dynamic_encoder(dynamic)
+
+            if self.mask_fn is not None:
+                mask = self.mask_fn(mask, dynamic, ptr.data)
+
+        tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
+        tour_logp = torch.cat(tour_logp, dim=1).sum(1)  # (batch_size,)
+        return tour_idx, tour_logp
 
 
 class DRL4VRP(nn.Module):
+    """Defines the main Encoder + Decoder combinatorial model.
+
+    This module differs from the TSP module in the following manner:
+    1. Each sequence can get processed a different number of times
+    2. Each sequence that changes gets stored individually in a list of lists,
+       making the approach less efficient.
+    """
 
     def __init__(self, static_size, dynamic_size, hidden_size, update_fn=None,
                  mask_fn=None, dropout=0., num_layers=1, use_cuda=False):
@@ -176,27 +273,17 @@ class DRL4VRP(nn.Module):
         # Define the encoder & decoder models
         self.static_encoder = Encoder(static_size, hidden_size)
         self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
-        self.decoder = Decoder(static_size, hidden_size, dropout, num_layers, use_cuda)
+        self.decoder = Decoder(static_size, hidden_size, dropout, num_layers)
 
-        if use_cuda:
-            self.cuda()
+        for p in self.parameters():
+            if len(p.shape) > 1:
+                nn.init.xavier_uniform(p)
 
     def forward(self, static, dynamic, last_output=None, last_hidden=None):
-        """
-
-        If we've supplied a masking function (on construction), we'll use that 
-        to determine when to stop (and use an arbitrary number of iters). 
-        Otherwise, treat the problem as a TSP, and only perform seq_len iterations
-
-        Parameters
-        ----------
-        mask_fn:
-            We can speed up learning by preventing states from being selected
-            by forcing a prob of -inf.
-        """
 
         # Structures for holding the output sequences
-        decoder_logp, decoder_indices = [], []
+        tour_idx = []
+        tour_logp = [[] for _ in range(static.size(0))]
 
         max_iters = static.size(2) if self.mask_fn is None else 1000
 
@@ -204,34 +291,44 @@ class DRL4VRP(nn.Module):
             mask = torch.cuda.FloatTensor(static.size(0), static.size(2)).fill_(1)
         else:
             mask = torch.FloatTensor(static.size(0), static.size(2)).fill_(1)
-        mask = Variable(mask)
 
-        static_enc = self.static_encoder(static)  # (B, num_feats, seq_len)
-        dynamic_enc = self.dynamic_encoder(dynamic)  # (B, num_feats, seq_len)
+        # Begin optimization - static is onsly ever processed once, while dynamic
+        # may be updated on each iteration, depending on the problem
+        static_enc = self.static_encoder(static)
+        dynamic_enc = self.dynamic_encoder(dynamic)
 
-        for _ in range(max_iters):
+        iter_ = 0
+        while iter_ < max_iters and mask.byte().any():
+
+            iter_ = iter_ + 1
 
             probs, last_hidden = self.decoder(static_enc, dynamic_enc,
                                               last_output, last_hidden)
 
-            # Use mask.log() to prevent certain indices from being selected. From:
-            # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
-            probs = F.softmax(probs + 1e-6 + mask.log(), dim=1)
+            probs = F.softmax(probs + Variable(mask).log(), dim=1)
 
-            # When training we sample the next state, but for testing use greedy
             if self.training:
                 m = torch.distributions.Categorical(probs)
                 ptr = m.sample()
-                prob = m.log_prob(ptr)
+
+                # Sometimes an issue with Categorical & sampling on GPU;
+                # ensure we're only sampling from indices defined by the mask
+                while not torch.gather(mask, 1, ptr.data.unsqueeze(1)).byte().all():
+                    ptr = m.sample()
+                logp_ = m.log_prob(ptr)
             else:
                 prob, ptr = torch.max(probs, 1)
+                logp_ = prob.log()
+
+            # Only save the tour probs if the remaining demand in tour is > 0
+            is_active_mask = dynamic.data[:, 1, 1:].sum(1).gt(0).float()
+            for idx in is_active_mask.nonzero().squeeze(1):
+                tour_logp[idx].append(logp_[idx])
+
+            tour_idx.append(ptr.data.unsqueeze(1))
 
             view = ptr.view(-1, 1, 1).expand(-1, static.size(1), -1)
             last_output = torch.gather(static, 2, view).squeeze(2)
-
-            # Keep track of the probability we used in selecting the action
-            decoder_logp.append(prob.unsqueeze(1))
-            decoder_indices.append(ptr.data.unsqueeze(1))
 
             # Update the dynamics variables
             if self.update_fn is not None:
@@ -240,14 +337,13 @@ class DRL4VRP(nn.Module):
 
             # Update the mask
             if self.mask_fn is not None:
-                mask = self.mask_fn(mask.clone(), dynamic, ptr.data)
-                if not mask.byte().any():
-                    break
+                mask = self.mask_fn(mask, dynamic, ptr.data)
 
         # (batch_size, seq_len)
-        decoder_logp = torch.cat(decoder_logp, dim=1)
-        decoder_indices = torch.cat(decoder_indices, dim=1)
-        return decoder_indices, decoder_logp
+        tour_idx = torch.cat(tour_idx, dim=1)
+        tour_logp = torch.cat([torch.cat(p_).sum() for p_ in tour_logp])
+
+        return tour_idx, tour_logp
 
 
 if __name__ == '__main__':
