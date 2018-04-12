@@ -43,16 +43,15 @@ class Attention(nn.Module):
         return attns
 
 
+'''
 class Decoder(nn.Module):
     """Calculates the next state given the previous state and input embeddings."""
 
     def __init__(self, output_size, hidden_size, dropout=0.2, num_layers=1):
         super(Decoder, self).__init__()
 
-        # Use a learnable initial state (x0) & hidden representation (h0), with
-        # v & W used to compute the output with attentions
+        # Use a learnable initial state (x0) if none is provided
         self.x0 = nn.Parameter(torch.FloatTensor(1, output_size))
-        self.h0 = nn.Parameter(torch.FloatTensor(num_layers, 1, hidden_size))
         self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
         self.W = nn.Parameter(torch.FloatTensor(hidden_size, 2 * hidden_size))
 
@@ -65,9 +64,7 @@ class Decoder(nn.Module):
 
         batch_size, _, _ = static_enc.size()
 
-        # Use a learnable hidden state & input for the decoder
-        if last_hidden is None:
-            last_hidden = self.h0.expand(-1, batch_size, -1).contiguous()
+        # If we're solving e.g. TSP with no initial state - learn one instead
         if last_output is None:
             last_output = self.x0.expand(batch_size, -1)
 
@@ -80,13 +77,52 @@ class Decoder(nn.Module):
         # The context vector is a weighted combination of the attention + inputs
         context = attn.bmm(static_enc.permute(0, 2, 1))  # (B, 1, num_feats)
 
-        """
-        if context.is_cuda:
-           noise = torch.cuda.FloatTensor(*context.size()).normal_(-0.1, 0.1)
-        else:
-           noise = torch.FloatTensor(*context.size()).normal_(-0.1, 0.1)
-        context = context + Variable(noise, requires_grad=False)
-        """
+        # Calculate the next output using Batch-matrix-multiply ops
+        context = context.squeeze(1).unsqueeze(2).expand_as(static_enc)
+        energy = torch.cat((static_enc, context), dim=1)  # (B, num_feats, seq_len)
+
+        W_view = self.W.unsqueeze(0).expand(batch_size, -1, -1)
+        v_view = self.v.unsqueeze(0).expand(batch_size, -1, -1)
+
+        probs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
+        probs = probs.squeeze(1)
+
+        return probs, hidden
+'''
+
+
+class Decoder(nn.Module):
+    """Calculates the next state given the previous state and input embeddings."""
+
+    def __init__(self, output_size, hidden_size, dropout=0.2, num_layers=1):
+        super(Decoder, self).__init__()
+
+        # Use a learnable initial state (x0) if none is provided
+        self.x0 = nn.Parameter(torch.FloatTensor(1, output_size))
+        self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
+        self.W = nn.Parameter(torch.FloatTensor(hidden_size, 2 * hidden_size))
+
+        # Used to compute a representation of the current decoder output
+        self.embedding = nn.Linear(output_size, hidden_size)
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, dropout=dropout)
+        self.attn = Attention(hidden_size)
+
+    def forward(self, static_enc, dynamic_enc, last_output, last_hidden):
+
+        batch_size, _, _ = static_enc.size()
+
+        # If we're solving e.g. TSP with no initial state - learn one instead
+        if last_output is None:
+            last_output = self.x0.expand(batch_size, -1)
+
+        last_embedding = self.embedding(last_output).unsqueeze(0)
+        rnn_out, hidden = self.lstm(last_embedding, last_hidden)
+
+        # Attention is applied across the static and dynamic states of the input
+        attn = self.attn(static_enc, dynamic_enc, rnn_out)  # (B, 1, seq_len)
+
+        # The context vector is a weighted combination of the attention + inputs
+        context = attn.bmm(static_enc.permute(0, 2, 1))  # (B, 1, num_feats)
 
         # Calculate the next output using Batch-matrix-multiply ops
         context = context.squeeze(1).unsqueeze(2).expand_as(static_enc)
@@ -95,62 +131,10 @@ class Decoder(nn.Module):
         W_view = self.W.unsqueeze(0).expand(batch_size, -1, -1)
         v_view = self.v.unsqueeze(0).expand(batch_size, -1, -1)
 
-        outputs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
-        outputs = outputs.squeeze(1)
+        probs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
+        probs = probs.squeeze(1)
 
-        return outputs, hidden
-
-
-class Critic(nn.Module):
-    """Estimates the problem complexity."""
-
-    def __init__(self, static_size, dynamic_size, hidden_size, num_process_iter, use_cuda):
-        super(Critic, self).__init__()
-
-        self.num_process_iter = num_process_iter
-        self.use_cuda = use_cuda
-
-        # Define the encoder & decoder models
-        self.static_encoder = Encoder(static_size, hidden_size)
-        self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
-        self.attn = Attention(hidden_size)
-        self.fc1 = nn.Linear(hidden_size, 20)
-        self.fc2 = nn.Linear(20, 1)
-
-        for p in self.parameters():
-            if len(p.shape) > 1:
-                nn.init.xavier_uniform(p)
-
-    def forward(self, static, dynamic, initial_state):
-
-        static_enc = self.static_encoder(static)
-        dynamic_enc = self.dynamic_encoder(dynamic)
-
-        batch_size, num_feats, _ = static_enc.size()
-
-        if initial_state is None:
-            # Use an empty context vector
-            if self.use_cuda:
-                x0 = torch.cuda.FloatTensor(1, batch_size, num_feats).fill_(0)
-            else:
-                x0 = torch.FloatTensor(1, batch_size, num_feats).fill_(0)
-            context = Variable(x0)
-        else:
-            # Pass initial state through an encoder
-            context = self.static_encoder(initial_state.unsqueeze(2))
-            context = context.permute(2, 0, 1)
-
-        static_p = static_enc.permute(0, 2, 1)
-        for _ in range(self.num_process_iter):
-
-            # Attention is applied across the static and dynamic states
-            attn = self.attn(static_enc, dynamic_enc, context)  # (B, 1, Seq)
-            context[0] = attn.bmm(static_p).squeeze(1)
-
-        output = F.relu(self.fc1(context.squeeze(0)))
-        output = self.fc2(output)
-
-        return F.elu(output)
+        return probs, hidden
 
 
 class DRL4TSP(nn.Module):
@@ -211,9 +195,9 @@ class DRL4TSP(nn.Module):
         static_enc = self.static_encoder(static)
         dynamic_enc = self.dynamic_encoder(dynamic)
 
-        iter_ = 0
-        while iter_ < static.size(2) and mask.byte().any():
-            iter_ = iter_ + 1
+        step = 0
+        while step < static.size(2) and mask.byte().any():
+            step = step + 1
 
             probs, last_hidden = self.decoder(static_enc, dynamic_enc,
                                               last_output, last_hidden)
@@ -222,7 +206,6 @@ class DRL4TSP(nn.Module):
             probs = F.softmax(probs + mask_var.log(), dim=1)
 
             if self.training:
-                # Sample the next state using distribution defined by probs
                 m = torch.distributions.Categorical(probs)
                 ptr = m.sample()
 
@@ -285,8 +268,6 @@ class DRL4VRP(nn.Module):
         tour_idx = []
         tour_logp = [[] for _ in range(static.size(0))]
 
-        max_iters = static.size(2) if self.mask_fn is None else 1000
-
         if self.use_cuda:
             mask = torch.cuda.FloatTensor(static.size(0), static.size(2)).fill_(1)
         else:
@@ -297,10 +278,10 @@ class DRL4VRP(nn.Module):
         static_enc = self.static_encoder(static)
         dynamic_enc = self.dynamic_encoder(dynamic)
 
-        iter_ = 0
-        while iter_ < max_iters and mask.byte().any():
-
-            iter_ = iter_ + 1
+        step = 0
+        max_step = static.size(2) if self.mask_fn is None else 1000
+        while step < max_step and mask.byte().any():
+            step = step + 1
 
             probs, last_hidden = self.decoder(static_enc, dynamic_enc,
                                               last_output, last_hidden)

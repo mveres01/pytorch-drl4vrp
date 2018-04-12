@@ -6,9 +6,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-# TODO: Have the "demand" of the depot dynamically change when an index is selected,
-# so the demand is not always constant***
-
 
 class VehicleRoutingDataset(Dataset):
 
@@ -139,69 +136,75 @@ class VehicleRoutingDataset(Dataset):
         tensor = torch.cat((all_loads.unsqueeze(1), all_demands.unsqueeze(1)), 1)
         return Variable(tensor)
 
-    @staticmethod
-    def reward(static, tour_indices, use_cuda=False):
-        """
-        Function of: tour_length + number_passengers
-        """
+
+def reward(static, tour_indices, use_cuda=False):
+    """
+    Euclidean distance between all cities / nodes given by tour_indices
+    """
+
+    # Convert the indices back into a tour
+    idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
+
+    tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
+
+    start = static.data[:, :, 0].unsqueeze(1)
+
+    # Ensure we're always returning to the depot - not the extra concat
+    # won't add any extra loss, as the euclidean distance between consecutive
+    # points is 0
+    y = torch.cat((start, tour, start), dim=1)
+
+    # Euclidean distance between each consecutive point
+    tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
+
+    return Variable(tour_len).sum(1)
+
+
+def render(static, tour_indices, save_path):
+
+    plt.close('all')
+
+    num_plots = min(int(np.sqrt(len(tour_indices))), 3)
+    _, axes = plt.subplots(nrows=num_plots, ncols=num_plots,
+                           sharex='col', sharey='row')
+    axes = [a for ax in axes for a in ax]
+
+    for i, ax in enumerate(axes):
 
         # Convert the indices back into a tour
-        idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
+        idx = tour_indices[i]
+        if len(idx.size()) == 1:
+            idx = idx.unsqueeze(0)
 
-        tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
+        idx = idx.expand(static.size(1), -1)
+        data = torch.gather(static[i].data, 1, idx).cpu().numpy()
 
-        start = static.data[:, :, 0].unsqueeze(1)
+        start = static[i, :, 0].cpu().data.numpy()
+        x = np.hstack((start[0], data[0], start[0]))
+        y = np.hstack((start[1], data[1], start[1]))
 
-        # Make a full tour by returning to the start
-        y = torch.cat((start, tour, start), dim=1)
+        # Assign each subtour a different colour & label in order traveled
+        idx = np.hstack((0, tour_indices[i].cpu().numpy().flatten(), 0))
+        where = np.where(idx == 0)[0]
+        count = 0
 
-        # Euclidean distance between each consecutive point
-        tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
+        for j in range(len(where) - 1):
 
-        return Variable(tour_len).sum(1)
+            count += 1
+            low = where[j]
+            high = where[j + 1]
 
-    @staticmethod
-    def render(static, tour_indices, save_path):
+            if low + 1 == high:
+                continue
 
-        plt.close('all')
+            ax.plot(x[low: high + 1], y[low: high + 1], zorder=1, label=count)
 
-        num_plots = min(int(np.sqrt(len(tour_indices))), 3)
+        ax.legend(loc="upper right", fontsize=3, framealpha=0.5)
+        ax.scatter(x, y, s=4, c='r', zorder=2)
+        ax.scatter(x[0], y[0], s=20, c='k', marker='*', zorder=3)
 
-        for i in range(num_plots ** 2):
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
 
-            # Convert the indices back into a tour
-            idx = tour_indices[i]
-            if len(idx.size()) == 1:
-                idx = idx.unsqueeze(0)
-
-            idx = idx.expand(static.size(1), -1)
-            data = torch.gather(static[i].data, 1, idx).cpu().numpy()
-
-            start = static[i, :, 0].cpu().data.numpy()
-            x = np.hstack((start[0], data[0], start[0]))
-            y = np.hstack((start[1], data[1], start[1]))
-
-            plt.subplot(num_plots, num_plots, i + 1)
-
-            # Assign each subtour a different colour & label in order traveled
-            idx = np.hstack((0, tour_indices[i].cpu().numpy().flatten(), 0))
-            where = np.where(idx == 0)[0]
-            count = 0
-
-            for j in range(len(where) - 1):
-
-                count += 1
-                low = where[j]
-                high = where[j + 1]
-
-                if low + 1 == high:
-                    continue
-
-                plt.plot(x[low: high + 1], y[low: high + 1], zorder=1, label=count)
-
-            plt.legend(loc="upper right", fontsize=3, framealpha=0.5)
-            plt.scatter(x, y, s=4, c='r', zorder=2)
-            plt.scatter(x[0], y[0], s=20, c='k', marker='*', zorder=3)
-
-        plt.tight_layout()
-        plt.savefig(save_path, bbox_inches='tight', dpi=400)
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches='tight', dpi=400)
