@@ -43,7 +43,6 @@ class Attention(nn.Module):
         return attns
 
 
-'''
 class Decoder(nn.Module):
     """Calculates the next state given the previous state and input embeddings."""
 
@@ -70,53 +69,6 @@ class Decoder(nn.Module):
 
         last_embedding = self.embedding(last_output).unsqueeze(0)
         rnn_out, hidden = self.gru(last_embedding, last_hidden)
-
-        # Attention is applied across the static and dynamic states of the input
-        attn = self.attn(static_enc, dynamic_enc, rnn_out)  # (B, 1, seq_len)
-
-        # The context vector is a weighted combination of the attention + inputs
-        context = attn.bmm(static_enc.permute(0, 2, 1))  # (B, 1, num_feats)
-
-        # Calculate the next output using Batch-matrix-multiply ops
-        context = context.squeeze(1).unsqueeze(2).expand_as(static_enc)
-        energy = torch.cat((static_enc, context), dim=1)  # (B, num_feats, seq_len)
-
-        W_view = self.W.unsqueeze(0).expand(batch_size, -1, -1)
-        v_view = self.v.unsqueeze(0).expand(batch_size, -1, -1)
-
-        probs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
-        probs = probs.squeeze(1)
-
-        return probs, hidden
-'''
-
-
-class Decoder(nn.Module):
-    """Calculates the next state given the previous state and input embeddings."""
-
-    def __init__(self, output_size, hidden_size, dropout=0.2, num_layers=1):
-        super(Decoder, self).__init__()
-
-        # Use a learnable initial state (x0) if none is provided
-        self.x0 = nn.Parameter(torch.FloatTensor(1, output_size))
-        self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
-        self.W = nn.Parameter(torch.FloatTensor(hidden_size, 2 * hidden_size))
-
-        # Used to compute a representation of the current decoder output
-        self.embedding = nn.Linear(output_size, hidden_size)
-        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, dropout=dropout)
-        self.attn = Attention(hidden_size)
-
-    def forward(self, static_enc, dynamic_enc, last_output, last_hidden):
-
-        batch_size, _, _ = static_enc.size()
-
-        # If we're solving e.g. TSP with no initial state - learn one instead
-        if last_output is None:
-            last_output = self.x0.expand(batch_size, -1)
-
-        last_embedding = self.embedding(last_output).unsqueeze(0)
-        rnn_out, hidden = self.lstm(last_embedding, last_hidden)
 
         # Attention is applied across the static and dynamic states of the input
         attn = self.attn(static_enc, dynamic_enc, rnn_out)  # (B, 1, seq_len)
