@@ -67,7 +67,7 @@ class Critic(nn.Module):
 
 class NeuralCombinatorialSolver(object):
 
-    def __init__(self, actor, critic, reward_fn, render_fn, batch_mode='single',
+    def __init__(self, actor, critic, reward_fn, render_fn, 
                  plot_every=10, checkpoint_every=500, save_dir='outputs',
                  use_cuda=False):
 
@@ -75,7 +75,6 @@ class NeuralCombinatorialSolver(object):
         self.critic = critic
         self.reward_fn = reward_fn
         self.render_fn = render_fn
-        self.batch_mode = batch_mode
         self.plot_every = plot_every
         self.checkpoint_every = checkpoint_every
         self.save_dir = save_dir
@@ -86,14 +85,6 @@ class NeuralCombinatorialSolver(object):
             os.makedirs(self.save_dir)
         if not os.path.exists(self.checkpoint_dir):
             os.makedirs(self.checkpoint_dir)
-
-    def solve(self, static, dynamic, initial_state):
-
-        static_var = Variable(static)
-        dynamic_var = Variable(dynamic)
-        state_var = Variable(initial_state) if len(initial_state) > 0 else None
-
-        return self._singlepass(static_var, dynamic_var, state_var)
 
     def train(self, data_loader, actor_lr, critic_lr, max_grad_norm):
 
@@ -234,7 +225,6 @@ def train_tsp():
     num_nodes = 10
     save_dir = 'tsp_outputs/tsp_%s' % num_nodes
 
-    batch_mode = 'single'
     train_size = 1000000
     val_size = 1000
     batch_size = 64
@@ -272,7 +262,7 @@ def train_tsp():
         critic.cuda()
 
     solver = NeuralCombinatorialSolver(actor, critic, reward_fn, render_fn,
-                                       batch_mode, plot_every, checkpoint_every,
+                                       plot_every, checkpoint_every,
                                        save_dir, use_cuda)
 
     for epoch in range(100):
@@ -292,10 +282,9 @@ def train_vrp():
     # VRP20, Capacity 30:  6.34  (BS) - 6.51  (Greedy)
     # VRP50, Capacity 40:  11.08 (BS) - 11.32 (Greedy)
     # VRP100, Capacity 50: 16.86 (BS) - 17.12 (Greedy)
-    batch_mode = 'single'
-    num_nodes = 10
+    num_nodes = 50
     max_demand = 9
-    max_load = 20
+    max_load = 40
     batch_size = 128
     save_dir = 'vrp_outputs/%d_%d_%d' % (num_nodes, max_demand, max_load)
 
@@ -311,7 +300,7 @@ def train_vrp():
     num_layers = 1
     num_process_iter = 2
 
-    plot_every = 10
+    plot_every = 500
     checkpoint_every = 250
     use_cuda = torch.cuda.is_available()
 
@@ -333,7 +322,7 @@ def train_vrp():
         critic.cuda()
 
     solver = NeuralCombinatorialSolver(actor, critic, reward_fn, render_fn,
-                                       batch_mode, plot_every, checkpoint_every,
+                                       plot_every, checkpoint_every,
                                        save_dir, use_cuda)
 
     for epoch in range(100):
