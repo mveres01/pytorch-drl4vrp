@@ -100,8 +100,8 @@ class DRL4TSP(nn.Module):
     Variants on this scheme can be introduced, such as:
         1. Only traveling a subset of the path
         2. Giving dynamic variables to the cities. By default the city generator
-           assumes a dynamic vector composed of 0's, and we do some slightly 
-           inefficient computations in this case. Improvements could be done to 
+           assumes a dynamic vector composed of 0's, and we do some slightly
+           inefficient computations in this case. Improvements could be done to
            only use static elements.
 
     Parameters
@@ -188,6 +188,7 @@ class DRL4TSP(nn.Module):
         return tour_idx, tour_logp
 
 
+'''
 class DRL4VRP(nn.Module):
     """Defines the main Encoder + Decoder combinatorial model.
 
@@ -276,6 +277,84 @@ class DRL4VRP(nn.Module):
         tour_idx = torch.cat(tour_idx, dim=1)
         tour_logp = torch.cat([torch.cat(p_).sum() for p_ in tour_logp])
 
+        return tour_idx, tour_logp
+'''
+
+
+class DRL4VRP(nn.Module):
+
+    def __init__(self, static_size, dynamic_size, hidden_size, update_fn=None,
+                 mask_fn=None, dropout=0., num_layers=1, use_cuda=False):
+        super(DRL4VRP, self).__init__()
+
+        self.update_fn = update_fn
+        self.mask_fn = mask_fn
+        self.use_cuda = use_cuda
+
+        # Define the encoder & decoder models
+        self.static_encoder = Encoder(static_size, hidden_size)
+        self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
+        self.decoder = Decoder(static_size, hidden_size, dropout, num_layers)
+
+        for p in self.parameters():
+            if len(p.shape) > 1:
+                nn.init.xavier_uniform(p)
+
+    def forward(self, static, dynamic, last_output=None, last_hidden=None):
+
+        # Structures for holding the output sequences
+        tour_idx = []
+        tour_logp = []
+
+        if self.use_cuda:
+            mask = torch.cuda.FloatTensor(static.size(0), static.size(2)).fill_(1)
+        else:
+            mask = torch.FloatTensor(static.size(0), static.size(2)).fill_(1)
+
+        # Begin optimization - static is only ever processed once, while dynamic
+        # may be updated on each iteration, depending on the problem
+        static_enc = self.static_encoder(static)
+        dynamic_enc = self.dynamic_encoder(dynamic)
+
+        step = 0
+        max_step = static.size(2) if self.mask_fn is None else 1000
+        while step < max_step and mask.byte().any():
+            step = step + 1
+
+            probs, last_hidden = self.decoder(static_enc, dynamic_enc,
+                                              last_output, last_hidden)
+
+            mask_var = Variable(mask, requires_grad=False)
+            probs = F.softmax(probs + mask_var.log(), dim=1)
+
+            if self.training:
+                m = torch.distributions.Categorical(probs)
+                ptr = m.sample()
+
+                # Sometimes an issue with Categorical & sampling on GPU;
+                # ensure we're only sampling from indices defined by the mask
+                while not torch.gather(mask, 1, ptr.data.unsqueeze(1)).byte().all():
+                    ptr = m.sample()
+                logp = m.log_prob(ptr)
+            else:
+                prob, ptr = torch.max(probs, 1)  # Greedy
+                logp = prob.log()
+
+            tour_logp.append(logp.unsqueeze(1))
+            tour_idx.append(ptr.data.unsqueeze(1))
+
+            view = ptr.view(-1, 1, 1).expand(-1, static.size(1), -1)
+            last_output = torch.gather(static, 2, view).squeeze(2)
+
+            if self.update_fn is not None:
+                dynamic = self.update_fn(dynamic, ptr.data)
+                dynamic_enc = self.dynamic_encoder(dynamic)
+
+            if self.mask_fn is not None:
+                mask = self.mask_fn(mask, dynamic, ptr.data)
+
+        tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
+        tour_logp = torch.cat(tour_logp, dim=1).sum(1)  # (batch_size,)
         return tour_idx, tour_logp
 
 

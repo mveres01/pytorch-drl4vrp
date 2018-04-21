@@ -64,7 +64,7 @@ class Critic(nn.Module):
         return F.elu(output)
 
 
-def validation(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
+def validate(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
 
     actor.eval()
 
@@ -105,10 +105,10 @@ def validation(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
     return mean_reward
 
 
-def main(problem, num_nodes, static_size, dynamic_size, hidden_size, dropout,
-         num_layers, batch_size, actor_lr, critic_lr, max_grad_norm,
-         num_process_iter, plot_every, checkpoint_every, use_cuda,
-         train_data, valid_data, mask_fn, update_fn, reward_fn, render_fn):
+def train(problem, num_nodes, static_size, dynamic_size, hidden_size, dropout,
+          num_layers, batch_size, actor_lr, critic_lr, max_grad_norm,
+          num_process_iter, plot_every, checkpoint_every, use_cuda,
+          train_data, valid_data, mask_fn, update_fn, reward_fn, render_fn):
 
     save_dir = os.path.join(problem, '%d' % num_nodes)
     checkpoint_dir = os.path.join(save_dir, 'checkpoints')
@@ -212,7 +212,7 @@ def main(problem, num_nodes, static_size, dynamic_size, hidden_size, dropout,
         mean_loss = np.mean(losses)
         mean_reward = np.mean(rewards)
 
-        mean_valid = validation(valid_loader, actor, reward_fn, render_fn, save_dir, use_cuda)
+        mean_valid = validate(valid_loader, actor, reward_fn, render_fn, save_dir, use_cuda)
 
         print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f' % (mean_loss, mean_reward, mean_valid))
 
@@ -256,7 +256,7 @@ def train_tsp():
     kwargs['plot_every'] = 500
     kwargs['checkpoint_every'] = 10
     kwargs['use_cuda'] = torch.cuda.is_available()
-    main(**kwargs)
+    train(**kwargs)
 
 
 def train_vrp():
@@ -271,10 +271,10 @@ def train_vrp():
 
     kwargs = {}
 
-    train_size = 1000
+    train_size = 1000000
     valid_size = 1000
-    num_nodes = 10
-    max_load = 20
+    num_nodes = 50
+    max_load = 40
     max_demand = 9
 
     train_data = VehicleRoutingDataset(train_size, num_nodes, max_load, max_demand)
@@ -291,20 +291,20 @@ def train_vrp():
     kwargs['static_size'] = 2
     kwargs['dynamic_size'] = 2
     kwargs['hidden_size'] = 128
-    kwargs['dropout'] = 0.2
+    kwargs['dropout'] = 0.1
     kwargs['num_layers'] = 1
-    kwargs['batch_size'] = 128
-    kwargs['actor_lr'] = 1e-3
+    kwargs['batch_size'] = 64
+    kwargs['actor_lr'] = 5e-4
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['num_process_iter'] = 2
+    kwargs['num_process_iter'] = 3
     kwargs['plot_every'] = 500
-    kwargs['checkpoint_every'] = 10
+    kwargs['checkpoint_every'] = 100
     kwargs['use_cuda'] = torch.cuda.is_available()
 
-    main(**kwargs)
+    train(**kwargs)
 
 
 if __name__ == '__main__':
-    # train_vrp()
-    train_tsp()
+    train_vrp()
+    # train_tsp()
