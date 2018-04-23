@@ -1,3 +1,12 @@
+"""Defines the main trainer model for combinatorial problems
+
+Each task must define the following functions:
+* mask_fn: can be None
+* update_fn: can be None
+* reward_fn: specifies the quality of found solutions
+* render_fn: Specifies how to plot found solutions. Can be None
+"""
+
 import os
 import time
 import numpy as np
@@ -8,16 +17,21 @@ import torch.optim as optim
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 
-from model import DRL4TSP, DRL4VRP, Encoder, Attention
+from model import DRL4VRP, Encoder, Attention
 
 
 class Critic(nn.Module):
-    """Estimates the problem complexity."""
+    """Estimates the problem complexity.
+
+    This is a basic module that just looks at the input space, and tries to
+    estimate how long it thinks a tour will be.
+    """
 
     def __init__(self, static_size, dynamic_size, hidden_size,
                  num_process_iter, use_cuda):
         super(Critic, self).__init__()
 
+        # How many times we want to look at the input & update the context vec
         self.num_process_iter = num_process_iter
         self.use_cuda = use_cuda
 
@@ -65,6 +79,7 @@ class Critic(nn.Module):
 
 
 def validate(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
+    """Used to monitor progress on a validation set & optionally plot solution."""
 
     actor.eval()
 
@@ -105,10 +120,10 @@ def validate(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
     return mean_reward
 
 
-def train(problem, num_nodes, static_size, dynamic_size, hidden_size, dropout,
-          num_layers, batch_size, actor_lr, critic_lr, max_grad_norm,
-          num_process_iter, plot_every, checkpoint_every, use_cuda,
-          train_data, valid_data, mask_fn, update_fn, reward_fn, render_fn):
+def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
+          render_fn, batch_size, actor_lr, critic_lr,
+          max_grad_norm, plot_every, checkpoint_every, use_cuda):
+    """Constructs the main actor & critic networks, and performs all training."""
 
     save_dir = os.path.join(problem, '%d' % num_nodes)
     checkpoint_dir = os.path.join(save_dir, 'checkpoints')
@@ -117,19 +132,6 @@ def train(problem, num_nodes, static_size, dynamic_size, hidden_size, dropout,
         os.makedirs(save_dir)
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
-
-    if problem == 'vrp':
-        actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn,
-                        mask_fn, dropout, num_layers, use_cuda)
-    else:
-        actor = DRL4TSP(static_size, dynamic_size, hidden_size, update_fn,
-                        mask_fn, dropout, num_layers, use_cuda)
-
-    critic = Critic(static_size, dynamic_size, hidden_size, num_process_iter, use_cuda)
-
-    if use_cuda:
-        actor.cuda()
-        critic.cuda()
 
     actor_optim = optim.Adam(actor.parameters(), lr=actor_lr)
     critic_optim = optim.Adam(critic.parameters(), lr=critic_lr)
@@ -236,27 +238,39 @@ def train_tsp():
     valid_data = TSPDataset(size=num_nodes, num_samples=valid_size)
     kwargs['train_data'] = train_data
     kwargs['valid_data'] = valid_data
-    kwargs['mask_fn'] = tsp.update_mask
-    kwargs['update_fn'] = None
     kwargs['reward_fn'] = tsp.reward
     kwargs['render_fn'] = tsp.render
-
     kwargs['problem'] = 'tsp'
+    mask_fn = tsp.update_mask
+    update_fn = None
+
+    static_size = 2
+    dynamic_size = 1
+    hidden_size = 128
+    dropout = 0.1
+    num_layers = 1
+    use_cuda = torch.cuda.is_available()
+    num_process_iter = 3
+
+    actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn,
+                    mask_fn, dropout, num_layers, use_cuda)
+    critic = Critic(static_size, dynamic_size, hidden_size, num_process_iter,
+                    use_cuda)
+
+    if use_cuda:
+        actor.cuda()
+        critic.cuda()
+
     kwargs['num_nodes'] = num_nodes
-    kwargs['static_size'] = 2
-    kwargs['dynamic_size'] = 1
-    kwargs['hidden_size'] = 128
-    kwargs['dropout'] = 0.2
-    kwargs['num_layers'] = 1
-    kwargs['batch_size'] = 128
-    kwargs['actor_lr'] = 1e-3
+    kwargs['batch_size'] = 64
+    kwargs['actor_lr'] = 5e-4
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['num_process_iter'] = 2
     kwargs['plot_every'] = 500
-    kwargs['checkpoint_every'] = 10
-    kwargs['use_cuda'] = torch.cuda.is_available()
-    train(**kwargs)
+    kwargs['checkpoint_every'] = 100
+    kwargs['use_cuda'] = use_cuda
+
+    train(actor, critic, **kwargs)
 
 
 def train_vrp():
@@ -271,40 +285,54 @@ def train_vrp():
 
     kwargs = {}
 
-    train_size = 1000000
+    train_size = 100000
     valid_size = 1000
-    num_nodes = 50
-    max_load = 40
+    num_nodes = 10
+    max_load = 20
     max_demand = 9
 
     train_data = VehicleRoutingDataset(train_size, num_nodes, max_load, max_demand)
     valid_data = VehicleRoutingDataset(valid_size, num_nodes, max_load, max_demand)
     kwargs['train_data'] = train_data
     kwargs['valid_data'] = valid_data
-    kwargs['mask_fn'] = train_data.update_mask
-    kwargs['update_fn'] = train_data.update_dynamic
     kwargs['reward_fn'] = vrp.reward
     kwargs['render_fn'] = vrp.render
-
     kwargs['problem'] = 'vrp'
+    mask_fn = train_data.update_mask
+    update_fn = train_data.update_dynamic
+
+    static_size = 2
+    dynamic_size = 2
+    hidden_size = 128
+    dropout = 0.1
+    num_layers = 1
+    use_cuda = torch.cuda.is_available()
+    num_process_iter = 3
+
+    actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn,
+                    mask_fn, dropout, num_layers, use_cuda)
+    critic = Critic(static_size, dynamic_size, hidden_size, num_process_iter,
+                    use_cuda)
+
+    if use_cuda:
+        actor.cuda()
+        critic.cuda()
+
     kwargs['num_nodes'] = num_nodes
-    kwargs['static_size'] = 2
-    kwargs['dynamic_size'] = 2
-    kwargs['hidden_size'] = 128
-    kwargs['dropout'] = 0.1
-    kwargs['num_layers'] = 1
     kwargs['batch_size'] = 64
     kwargs['actor_lr'] = 5e-4
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['num_process_iter'] = 3
     kwargs['plot_every'] = 500
     kwargs['checkpoint_every'] = 100
-    kwargs['use_cuda'] = torch.cuda.is_available()
+    kwargs['use_cuda'] = use_cuda
 
-    train(**kwargs)
+    #kwargs['actor'] = actor
+    #kwargs['critic'] = critic
+
+    train(actor, critic, **kwargs)
 
 
 if __name__ == '__main__':
-    train_vrp()
-    # train_tsp()
+    # train_vrp()
+    train_tsp()

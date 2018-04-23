@@ -1,3 +1,14 @@
+"""Defines the main task for the TSP
+
+The TSP is defined by the following traits:
+    1. Each city in the list must be visited once and only once
+    2. The salesman must return to the original node at the end of the tour
+
+Since the TSP doesn't have dynamic elements, we return an empty list on 
+__getitem__, which gets processed in trainer.py to be None
+
+"""
+
 import numpy as np
 import torch
 from torch.autograd import Variable
@@ -13,7 +24,6 @@ class TSPDataset(Dataset):
         super(TSPDataset, self).__init__()
 
         torch.manual_seed(seed)
-
         self.dataset = torch.FloatTensor(num_samples, 2, size).uniform_(0, 1)
         self.dynamic = torch.zeros(num_samples, 1, size)
         self.num_nodes = size
@@ -23,10 +33,12 @@ class TSPDataset(Dataset):
         return self.size
 
     def __getitem__(self, idx):
+        # (static, dynamic, start_loc)
         return (self.dataset[idx], self.dynamic[idx], [])
 
 
 def update_mask(mask, dynamic, chosen_idx):
+    """Marks the visited city, so it can't be selected a second time."""
     mask.scatter_(1, chosen_idx.unsqueeze(1), 0)
     return mask
 
@@ -35,11 +47,14 @@ def reward(static, tour_indices, use_cuda=False):
     """
     Parameters
     ----------
-    tour: torch.FloatTensor of size (batch_size, num_features, seq_len)
+    tour_indices: torch.IntTensor of size (batch_size, num_cities)
+    use_cuda: whether to put the found solutions on the GPU. Might not be needed 
+        for all problems, but acts as a placemholder for solutions that will.
 
     Returns
     -------
-    Euclidean distance between consecutive nodes on the route of size (batch_size, seq_len)
+    Euclidean distance between consecutive nodes on the route of size 
+    (batch_size, num_cities)
     """
 
     # Convert the indices back into a tour
@@ -56,6 +71,7 @@ def reward(static, tour_indices, use_cuda=False):
 
 
 def render(static, tour_indices, save_path):
+    """Plots the found tours."""
 
     plt.close('all')
 
