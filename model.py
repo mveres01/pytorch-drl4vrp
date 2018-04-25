@@ -168,7 +168,7 @@ class DRL4VRP(nn.Module):
             be other things as well
         last_hidden: Array of size (batch_size, num_hidden)
             Defines the last hidden state for the RNN
-    "   """
+        """
         # Structures for holding the output sequences
         tour_idx, tour_logp = [], []
 
@@ -221,10 +221,6 @@ class DRL4VRP(nn.Module):
                 dynamic = self.update_fn(dynamic, ptr.data)
                 dynamic_enc = self.dynamic_encoder(dynamic)
 
-                #dyn = torch.gather(dynamic, 2, view)
-                #decoded = self.dynamic_encoder(dyn)
-                #dynamic_enc.scatter(2, view, decoded)
-
             if self.mask_fn is not None:
                 mask = self.mask_fn(mask, dynamic, ptr.data)
 
@@ -236,4 +232,14 @@ class DRL4VRP(nn.Module):
 
 
 if __name__ == '__main__':
-    raise Exception('Cannot be called from main')
+    import matplotlib.pyplot as plt
+    import numpy as np
+    rand = np.random.uniform(0, 1., (50, 2))
+    _, ax = plt.subplots(nrows=1, ncols=1,
+                         sharex='col', sharey='row')
+    ax.scatter(rand[:, 0], rand[:, 1], c='r', zorder=2)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    plt.tight_layout()
+    plt.show()
+    #raise Exception('Cannot be called from main')

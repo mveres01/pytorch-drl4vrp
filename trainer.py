@@ -103,21 +103,13 @@ def validate(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
         # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
         rewards.append(torch.mean(reward.data))
 
-        if batch_idx < 50:
-            indices.append(tour_indices)
-            inputs.append(static)
-
-    inputs = torch.cat(inputs, dim=0)
-
-    mean_reward = np.mean(rewards)
-
-    if render_fn is not None:
-        save_path = os.path.join(save_dir, '%2.4f_valid.png' % mean_reward)
-        render_fn(inputs, indices, save_path)
+        if render_fn is not None and batch_idx < 50:
+            mean_reward = np.mean(rewards)
+            save_path = os.path.join(save_dir, '%2.4f_valid.png' % mean_reward)
+            render_fn(static, tour_indices, save_path)
 
     actor.train()
-
-    return mean_reward
+    return np.mean(rewards)
 
 
 def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
@@ -139,7 +131,7 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
     for epoch in range(100):
 
         train_loader = DataLoader(train_data, batch_size, True, num_workers=0)
-        valid_loader = DataLoader(valid_data, 1, True, num_workers=0)
+        valid_loader = DataLoader(valid_data, batch_size, False, num_workers=0)
 
         actor.train()
         critic.train()
@@ -230,6 +222,7 @@ def train_tsp():
 
     kwargs = {}
 
+    # Problem - specific parameters
     train_size = 1000000
     valid_size = 1000
     num_nodes = 10
@@ -244,6 +237,7 @@ def train_tsp():
     mask_fn = tsp.update_mask
     update_fn = None
 
+    # Model - specific parameters
     static_size = 2
     dynamic_size = 1
     hidden_size = 128
@@ -285,7 +279,8 @@ def train_vrp():
 
     kwargs = {}
 
-    train_size = 100000
+    # Problem - specific parameters
+    train_size = 1000000
     valid_size = 1000
     num_nodes = 10
     max_load = 20
@@ -296,18 +291,19 @@ def train_vrp():
     kwargs['train_data'] = train_data
     kwargs['valid_data'] = valid_data
     kwargs['reward_fn'] = vrp.reward
-    kwargs['render_fn'] = vrp.render
+    kwargs['render_fn'] = None  # vrp.render
     kwargs['problem'] = 'vrp'
     mask_fn = train_data.update_mask
     update_fn = train_data.update_dynamic
 
+    # Model - specific parameters
     static_size = 2
     dynamic_size = 2
     hidden_size = 128
     dropout = 0.1
     num_layers = 1
-    use_cuda = torch.cuda.is_available()
     num_process_iter = 3
+    use_cuda = torch.cuda.is_available()
 
     actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn,
                     mask_fn, dropout, num_layers, use_cuda)
@@ -319,18 +315,25 @@ def train_vrp():
         critic.cuda()
 
     kwargs['num_nodes'] = num_nodes
-    kwargs['batch_size'] = 64
+    kwargs['batch_size'] = 1  # 64
     kwargs['actor_lr'] = 5e-4
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['plot_every'] = 500
-    kwargs['checkpoint_every'] = 100
+    kwargs['plot_every'] = 1
+    kwargs['checkpoint_every'] = 100000
     kwargs['use_cuda'] = use_cuda
 
-    #kwargs['actor'] = actor
-    #kwargs['critic'] = critic
-
     train(actor, critic, **kwargs)
+
+    '''
+    #path = 'vrp/50/checkpoints/batch13499_11.5925_'
+    path = 'vrp/50/checkpoints/batch499_11.6461_'
+    params = torch.load(path + 'actor.pt', map_location=lambda storage, loc: storage)
+    actor.load_state_dict(params)
+
+    params = torch.load(path + 'critic.pt', map_location=lambda storage, loc: storage)
+    critic.load_state_dict(params)
+    '''
 
 
 if __name__ == '__main__':

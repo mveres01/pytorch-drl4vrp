@@ -172,6 +172,77 @@ def reward(static, tour_indices, use_cuda=False):
     return Variable(tour_len).sum(1)
 
 
+'''
+def render(static, tour_indices, save_path):
+    """Plots the found solution."""
+
+    path = 'C:/Users/Matt/Documents/ffmpeg-3.4.2-win64-static/bin/ffmpeg.exe'
+    plt.rcParams['animation.ffmpeg_path'] = path
+
+    plt.close('all')
+
+    num_plots = min(int(np.sqrt(len(tour_indices))), 3)
+    fig, axes = plt.subplots(nrows=num_plots, ncols=num_plots,
+                             sharex='col', sharey='row')
+    axes = [a for ax in axes for a in ax]
+
+    all_lines = []
+    all_tours = []
+    for i, ax in enumerate(axes):
+
+        # Convert the indices back into a tour
+        idx = tour_indices[i]
+        if len(idx.size()) == 1:
+            idx = idx.unsqueeze(0)
+
+        idx = idx.expand(static.size(1), -1)
+        data = torch.gather(static[i].data, 1, idx).cpu().numpy()
+
+        start = static[i, :, 0].cpu().data.numpy()
+        x = np.hstack((start[0], data[0], start[0]))
+        y = np.hstack((start[1], data[1], start[1]))
+
+        cur_tour = np.vstack((x, y))
+
+        all_tours.append(cur_tour)
+        all_lines.append(ax.plot([], [])[0])
+
+        ax.scatter(x, y, s=4, c='r', zorder=2)
+        ax.scatter(x[0], y[0], s=20, c='k', marker='*', zorder=3)
+
+    from matplotlib.animation import FuncAnimation
+
+    tours = all_tours
+
+    def update(idx):
+
+        for i, line in enumerate(all_lines):
+
+            if idx >= tours[i].shape[1]:
+                continue
+
+            data = tours[i][:, idx]
+
+            xy_data = line.get_xydata()
+            xy_data = np.vstack((xy_data, np.atleast_2d(data)))
+
+            line.set_data(xy_data[:, 0], xy_data[:, 1])
+            line.set_linewidth(0.75)
+
+        return all_lines
+
+    anim = FuncAnimation(fig, update, init_func=None,
+                         frames=100, interval=200, blit=False,
+                         repeat=False)
+
+    anim.save('line.mp4', dpi=160)
+    plt.show()
+
+    import sys
+    sys.exit(1)
+'''
+
+
 def render(static, tour_indices, save_path):
     """Plots the found solution."""
 
@@ -219,6 +290,3 @@ def render(static, tour_indices, save_path):
 
     plt.tight_layout()
     plt.savefig(save_path, bbox_inches='tight', dpi=400)
-
-# seq_col_brew = sns.color_palette("Blues_r", 4)
-# sns.set_palette(seq_col_brew)
