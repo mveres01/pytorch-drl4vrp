@@ -26,14 +26,10 @@ class Attention(nn.Module):
 
         # W processes features from static decoder elements
         self.v = nn.Parameter(torch.zeros((1, 1, hidden_size),
-                                          device=device,
-                                          dtype=torch.float,
-                                          requires_grad=True))
+                                          device=device, requires_grad=True))
 
         self.W = nn.Parameter(torch.zeros((1, hidden_size, 3 * hidden_size),
-                                          device=device,
-                                          dtype=torch.float,
-                                          requires_grad=True))
+                                          device=device, requires_grad=True))
 
     def forward(self, static_hidden, dynamic_hidden, decoder_hidden):
 
@@ -61,14 +57,10 @@ class Pointer(nn.Module):
 
         # Used to calculate probability of selecting next state
         self.v = nn.Parameter(torch.zeros((1, 1, hidden_size),
-                                          device=device,
-                                          dtype=torch.float,
-                                          requires_grad=True))
+                                          device=device, requires_grad=True))
 
         self.W = nn.Parameter(torch.zeros((1, hidden_size, 2 * hidden_size),
-                                          device=device,
-                                          dtype=torch.float,
-                                          requires_grad=True))
+                                          device=device, requires_grad=True))
 
         # Used to compute a representation of the current decoder output
         self.gru = nn.GRU(hidden_size, hidden_size, num_layers,
@@ -97,14 +89,7 @@ class Pointer(nn.Module):
 
 
 class DRL4TSP(nn.Module):
-    """Defines the main Encoder + Decoder combinatorial model.
-
-    Variants on this scheme can be introduced, such as:
-        1. Only traveling a subset of the path
-        2. Giving dynamic variables to the cities. By default the city generator
-           assumes a dynamic vector composed of 0's, and we do some slightly
-           inefficient computations in this case. Improvements could be done to
-           only use static elements.
+    """Defines the main Encoder, Decoder, and Pointer combinatorial models.
 
     Parameters
     ----------
@@ -128,12 +113,10 @@ class DRL4TSP(nn.Module):
         by providing a sort of 'rules' guidlines to the algorithm. If no mask
         is provided, we terminate the search after a fixed number of iterations
         to avoid tours that stretch forever
-    dropout: float
-        Defines the dropout rate for the decoder
     num_layers: int
         Specifies the number of hidden layers to use in the decoder RNN
-    use_cuda: bool
-        Use the GPU or not
+    dropout: float
+        Defines the dropout rate for the decoder
     """
 
     def __init__(self, static_size, dynamic_size, hidden_size,
@@ -157,10 +140,8 @@ class DRL4TSP(nn.Module):
             if len(p.shape) > 1:
                 nn.init.xavier_uniform_(p)
 
-        # Used as a proxy initial state in the decoder when not given
-        self.x0 = torch.zeros((1, static_size, 1),
-                              requires_grad=True,
-                              dtype=torch.float, device=device)
+        # Used as a proxy initial state in the decoder when not specified
+        self.x0 = torch.zeros((1, static_size, 1), requires_grad=True, device=device)
 
     def forward(self, static, dynamic, decoder_input=None, last_hh=None):
         """
@@ -187,7 +168,7 @@ class DRL4TSP(nn.Module):
             decoder_input = self.x0.expand(batch_size, -1, -1)
 
         # Always use a mask - if no function is provided, we don't update it
-        mask = torch.ones(batch_size, sequence_size, dtype=torch.float,
+        mask = torch.ones(batch_size, sequence_size,
                           device=device, requires_grad=False)
 
         # Structures for holding the output sequences
@@ -200,11 +181,7 @@ class DRL4TSP(nn.Module):
         static_hidden = self.static_encoder(static)
         dynamic_hidden = self.dynamic_encoder(dynamic)
 
-        for step in range(max_steps):
-
-
-            if step > sequence_size * 3:
-                raise Exception('Should not happen')
+        for _ in range(max_steps):
 
             if not mask.byte().any():
                 break

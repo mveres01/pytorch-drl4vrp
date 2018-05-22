@@ -81,7 +81,7 @@ class VehicleRoutingDataset(Dataset):
         # Otherwise, we can choose to go anywhere where demand is > 0
         new_mask = demands.ne(0)
 
-        # We should avoid traveling to the depot back-to-back 
+        # We should avoid traveling to the depot back-to-back
         repeat_home = chosen_idx.ne(0)
         if repeat_home.any():
             new_mask[repeat_home, 0] = 1.

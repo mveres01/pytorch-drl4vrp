@@ -25,8 +25,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class Critic(nn.Module):
     """Estimates the problem complexity.
 
-    This is a basic module that just looks at the input space, and tries to
-    estimate how long it thinks a tour will be.
+    This is a basic module that just looks at the log-probabilities predicted by 
+    the encoder + decoder, and returns an estimate of complexity
     """
 
     def __init__(self, hidden_size):
@@ -69,8 +69,6 @@ def validate(data_loader, actor, reward_fn, render_fn, save_dir):
             tour_indices, _ = actor.forward(static, dynamic, x0)
 
             reward = reward_fn(static, tour_indices)
-
-            # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
             rewards.append(torch.mean(reward.detach()))
 
             if render_fn is not None and batch_idx < 50:
@@ -105,10 +103,10 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
         actor.train()
         critic.train()
 
+        start = time.time()
+
         losses, rewards = [], []
         for batch_idx, batch in enumerate(train_loader):
-
-            start = time.time()
 
             static, dynamic, x0 = batch
 
@@ -149,18 +147,11 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
                 mean_loss = np.mean(losses[-checkpoint_every:])
                 mean_reward = np.mean(rewards[-checkpoint_every:])
 
-                print('%d/%d, avg. reward: %2.4f, loss: %2.4f, took: %2.4fs' %
-                      (batch_idx, len(train_loader),
-                       mean_reward, mean_loss, time.time() - start))
-
-                fname = 'epoch%dbatch%d_%2.4f_actor.pt' %\
-                    (epoch, batch_idx, mean_reward)
-                save_path = os.path.join(checkpoint_dir, fname)
+                prefix = 'epoch%dbatch%d_%2.4f' % (epoch, batch_idx, mean_reward)
+                save_path = os.path.join(checkpoint_dir, prefix + '_actor.pt')
                 torch.save(actor.state_dict(), save_path)
 
-                fname = 'epoch%dbatch%d_%2.4f_critic.pt' %\
-                    (epoch, batch_idx, mean_reward)
-                save_path = os.path.join(checkpoint_dir, fname)
+                save_path = os.path.join(checkpoint_dir, prefix + '_critic.pt')
                 torch.save(critic.state_dict(), save_path)
 
                 if render_fn is not None:
@@ -168,9 +159,12 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
                                              (epoch, batch_idx))
                     render_fn(static, tour_indices, save_path)
 
+                print('%d/%d, avg. reward: %2.4f, loss: %2.4f, took: %2.4fs' %
+                      (batch_idx, len(train_loader),
+                       mean_reward, mean_loss, time.time() - start))
+
         mean_loss = np.mean(losses)
         mean_reward = np.mean(rewards)
-
         mean_valid = validate(valid_loader, actor, reward_fn, render_fn, save_dir)
 
         print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f' % (mean_loss, mean_reward, mean_valid))
@@ -185,7 +179,6 @@ def train_tsp():
     from tasks import tsp
     from tasks.tsp import TSPDataset
 
-    # Problem - specific parameters
     train_size = 1000000
     valid_size = 1000
     num_nodes = 50
