@@ -11,7 +11,6 @@ __getitem__, which gets processed in trainer.py to be None
 
 import numpy as np
 import torch
-from torch.autograd import Variable
 from torch.utils.data import Dataset
 import matplotlib
 matplotlib.use('Agg')
@@ -24,7 +23,7 @@ class TSPDataset(Dataset):
         super(TSPDataset, self).__init__()
 
         torch.manual_seed(seed)
-        self.dataset = torch.FloatTensor(num_samples, 2, size).uniform_(0, 1)
+        self.dataset = torch.rand((num_samples, 2, size))
         self.dynamic = torch.zeros(num_samples, 1, size)
         self.num_nodes = size
         self.size = num_samples
@@ -43,7 +42,7 @@ def update_mask(mask, dynamic, chosen_idx):
     return mask
 
 
-def reward(static, tour_indices, use_cuda=False):
+def reward(static, tour_indices):
     """
     Parameters
     ----------
@@ -67,7 +66,7 @@ def reward(static, tour_indices, use_cuda=False):
     # Euclidean distance between each consecutive point
     tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
-    return Variable(tour_len).sum(1)
+    return torch.tensor(tour_len.sum(1), dtype=torch.float, device=static.device)
 
 
 def render(static, tour_indices, save_path):
@@ -75,10 +74,13 @@ def render(static, tour_indices, save_path):
 
     plt.close('all')
 
-    num_plots = min(int(np.sqrt(len(tour_indices))), 3)
+    num_plots = 3 if int(np.sqrt(len(tour_indices))) >= 3 else 1
 
     _, axes = plt.subplots(nrows=num_plots, ncols=num_plots,
                            sharex='col', sharey='row')
+
+    if num_plots == 1:
+        axes = [[axes]]
     axes = [a for ax in axes for a in ax]
 
     for i, ax in enumerate(axes):
@@ -88,8 +90,9 @@ def render(static, tour_indices, save_path):
         if len(idx.size()) == 1:
             idx = idx.unsqueeze(0)
 
+        # End tour at the starting index
         idx = idx.expand(static.size(1), -1)
-        idx = torch.cat((idx, idx[:, 0]), dim=1)
+        idx = torch.cat((idx, idx[:, 0:1]), dim=1)
 
         data = torch.gather(static[i].data, 1, idx).cpu().numpy()
 

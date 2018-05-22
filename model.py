@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = torch.device('cpu')
 
 
 class Encoder(nn.Module):
@@ -12,9 +14,8 @@ class Encoder(nn.Module):
         self.conv = nn.Conv1d(input_size, hidden_size, kernel_size=1)
 
     def forward(self, input):
-
-        output = self.conv(input)  # (batch, in, seq_len) -> (batch, out, seq_len)
-        return output
+        output = self.conv(input)
+        return output  # (batch, hidden_size, seq_len)
 
 
 class Attention(nn.Module):
@@ -23,75 +24,80 @@ class Attention(nn.Module):
     def __init__(self, hidden_size):
         super(Attention, self).__init__()
 
-        # W processes features from static, dynamic and decoder elements
-        self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
-        self.W = nn.Parameter(torch.FloatTensor(hidden_size, 3 * hidden_size))
+        # W processes features from static decoder elements
+        self.v = nn.Parameter(torch.zeros((1, 1, hidden_size),
+                                          device=device,
+                                          dtype=torch.float,
+                                          requires_grad=True))
 
-    def forward(self, static_enc, dynamic_enc, decoder_hidden):
+        self.W = nn.Parameter(torch.zeros((1, hidden_size, 3 * hidden_size),
+                                          device=device,
+                                          dtype=torch.float,
+                                          requires_grad=True))
 
-        batch_size, hidden_size, _ = static_enc.size()
+    def forward(self, static_hidden, dynamic_hidden, decoder_hidden):
 
-        # Energy shape is: (batch, total_num_feats, seq_len)
-        hidden = decoder_hidden.permute(1, 2, 0).expand_as(static_enc)
-        energy = torch.cat((static_enc, dynamic_enc, hidden), dim=1)
+        batch_size, hidden_size, _ = static_hidden.size()
 
-        v_view = self.v.unsqueeze(0).expand(batch_size, 1, hidden_size)
-        W_view = self.W.unsqueeze(0).expand(batch_size, hidden_size, -1)
+        hidden = decoder_hidden.unsqueeze(2).expand_as(static_hidden)
+        hidden = torch.cat((static_hidden, dynamic_hidden, hidden), 1)
 
-        attns = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
+        # Broadcast some dimensions so we can do batch-matrix-multiply
+        v = self.v.expand(batch_size, 1, hidden_size)
+        W = self.W.expand(batch_size, hidden_size, -1)
+
+        attns = torch.bmm(v, F.tanh(torch.bmm(W, hidden)))
         attns = F.softmax(attns, dim=2)  # (batch, seq_len)
         return attns
 
 
-class Decoder(nn.Module):
+class Pointer(nn.Module):
     """Calculates the next state given the previous state and input embeddings."""
 
-    def __init__(self, output_size, hidden_size, dropout=0.2, num_layers=1):
-        super(Decoder, self).__init__()
+    def __init__(self, hidden_size, num_layers=1, dropout=0.2):
+        super(Pointer, self).__init__()
 
-        # Use a learnable initial state (x0) if none is provided
-        self.x0 = nn.Parameter(torch.FloatTensor(1, output_size))
-        self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
-        self.W = nn.Parameter(torch.FloatTensor(hidden_size, 2 * hidden_size))
+        self.hidden_size = hidden_size
+
+        # Used to calculate probability of selecting next state
+        self.v = nn.Parameter(torch.zeros((1, 1, hidden_size),
+                                          device=device,
+                                          dtype=torch.float,
+                                          requires_grad=True))
+
+        self.W = nn.Parameter(torch.zeros((1, hidden_size, 2 * hidden_size),
+                                          device=device,
+                                          dtype=torch.float,
+                                          requires_grad=True))
 
         # Used to compute a representation of the current decoder output
-        self.embedding = nn.Linear(output_size, hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size, num_layers, dropout=dropout)
-        self.attn = Attention(hidden_size)
+        self.gru = nn.GRU(hidden_size, hidden_size, num_layers,
+                          dropout=dropout, batch_first=True)
+        self.encoder_attn = Attention(hidden_size)
 
-    def forward(self, static_enc, dynamic_enc, last_output, last_hidden):
+    def forward(self, static_hidden, dynamic_hidden, decoder_hidden, last_hh):
 
-        batch_size, _, _ = static_enc.size()
+        rnn_out, last_hh = self.gru(decoder_hidden.transpose(2, 1), last_hh)
+        rnn_out = rnn_out.squeeze(1)
 
-        # If we're solving e.g. TSP with no initial state - learn one instead
-        if last_output is None:
-            last_output = self.x0.expand(batch_size, -1)
-
-        last_embedding = self.embedding(last_output).unsqueeze(0)
-        rnn_out, hidden = self.gru(last_embedding, last_hidden)
-
-        # Attention is applied across the static and dynamic states of the input
-        attn = self.attn(static_enc, dynamic_enc, rnn_out)  # (B, 1, seq_len)
-
-        # The context vector is a weighted combination of the attention + inputs
-        context = attn.bmm(static_enc.permute(0, 2, 1))  # (B, 1, num_feats)
+        # Given a summary of the output, find an  input context
+        enc_attn = self.encoder_attn(static_hidden, dynamic_hidden, rnn_out)
+        context = enc_attn.bmm(static_hidden.permute(0, 2, 1))  # (B, 1, num_feats)
 
         # Calculate the next output using Batch-matrix-multiply ops
-        context = context.squeeze(1).unsqueeze(2).expand_as(static_enc)
-        energy = torch.cat((static_enc, context), dim=1)  # (B, num_feats, seq_len)
+        context = context.transpose(1, 2).expand_as(static_hidden)
+        energy = torch.cat((static_hidden, context), dim=1)  # (B, num_feats, seq_len)
 
-        W_view = self.W.unsqueeze(0).expand(batch_size, -1, -1)
-        v_view = self.v.unsqueeze(0).expand(batch_size, -1, -1)
+        v = self.v.expand(static_hidden.size(0), -1, -1)
+        W = self.W.expand(static_hidden.size(0), -1, -1)
 
-        probs = torch.bmm(v_view, F.tanh(torch.bmm(W_view, energy)))
-        probs = probs.squeeze(1)
+        probs = torch.bmm(v, F.tanh(torch.bmm(W, energy))).squeeze(1)
 
-        return probs, hidden
+        return probs, last_hh
 
 
-class DRL4VRP(nn.Module):
+class DRL4TSP(nn.Module):
     """Defines the main Encoder + Decoder combinatorial model.
-
 
     Variants on this scheme can be introduced, such as:
         1. Only traveling a subset of the path
@@ -119,8 +125,8 @@ class DRL4VRP(nn.Module):
     mask_fn: function or None
         Allows us to specify which elements of the input sequence are allowed to
         be selected. This is useful for speeding up training of the networks,
-        by providing a sort of 'rules' guidlines to the algorithm. If no mask 
-        is provided, we terminate the search after a fixed number of iterations 
+        by providing a sort of 'rules' guidlines to the algorithm. If no mask
+        is provided, we terminate the search after a fixed number of iterations
         to avoid tours that stretch forever
     dropout: float
         Defines the dropout rate for the decoder
@@ -130,9 +136,9 @@ class DRL4VRP(nn.Module):
         Use the GPU or not
     """
 
-    def __init__(self, static_size, dynamic_size, hidden_size, update_fn=None,
-                 mask_fn=None, dropout=0., num_layers=1, use_cuda=False):
-        super(DRL4VRP, self).__init__()
+    def __init__(self, static_size, dynamic_size, hidden_size,
+                 update_fn=None, mask_fn=None, num_layers=1, dropout=0.):
+        super(DRL4TSP, self).__init__()
 
         if dynamic_size < 1:
             raise ValueError(':param dynamic_size: must be > 0, even if the '
@@ -140,18 +146,23 @@ class DRL4VRP(nn.Module):
 
         self.update_fn = update_fn
         self.mask_fn = mask_fn
-        self.use_cuda = use_cuda
 
         # Define the encoder & decoder models
         self.static_encoder = Encoder(static_size, hidden_size)
         self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
-        self.decoder = Decoder(static_size, hidden_size, dropout, num_layers)
+        self.decoder = Encoder(static_size, hidden_size)
+        self.pointer = Pointer(hidden_size, num_layers, dropout)
 
         for p in self.parameters():
             if len(p.shape) > 1:
-                nn.init.xavier_uniform(p)
+                nn.init.xavier_uniform_(p)
 
-    def forward(self, static, dynamic, last_output=None, last_hidden=None):
+        # Used as a proxy initial state in the decoder when not given
+        self.x0 = torch.zeros((1, static_size, 1),
+                              requires_grad=True,
+                              dtype=torch.float, device=device)
+
+    def forward(self, static, dynamic, decoder_input=None, last_hh=None):
         """
         Parameters
         ----------
@@ -162,48 +173,58 @@ class DRL4VRP(nn.Module):
             Defines the elements to consider as static. For the VRP, this can be
             things like the (load, demand) of each city. If there are no dynamic
             elements, this can be set to None
-        last_output: Array of size (batch_size, num_feats)
+        decoder_input: Array of size (batch_size, num_feats)
             Defines the outputs for the decoder. Currently, we just use the
             static elements (e.g. (x, y) coordinates), but this can technically
             be other things as well
-        last_hidden: Array of size (batch_size, num_hidden)
+        last_hh: Array of size (batch_size, num_hidden)
             Defines the last hidden state for the RNN
         """
+
+        batch_size, input_size, sequence_size = static.size()
+
+        if decoder_input is None:
+            decoder_input = self.x0.expand(batch_size, -1, -1)
+
+        # Always use a mask - if no function is provided, we don't update it
+        mask = torch.ones(batch_size, sequence_size, dtype=torch.float,
+                          device=device, requires_grad=False)
+
         # Structures for holding the output sequences
         tour_idx, tour_logp = [], []
-
-        if self.use_cuda:
-            mask = torch.cuda.FloatTensor(static.size(0), static.size(2)).fill_(1)
-        else:
-            mask = torch.FloatTensor(static.size(0), static.size(2)).fill_(1)
+        max_steps = sequence_size if self.mask_fn is None else 1000
 
         # Static elements only need to be processed once, and can be used across
         # all 'pointing' iterations. When / if the dynamic elements change,
         # their representations will need to get calculated again.
-        # An improvement could be to only process those elements that recently
-        # changed, and not iterate over the full input space again.
-        static_enc = self.static_encoder(static)
-        dynamic_enc = self.dynamic_encoder(dynamic)
+        static_hidden = self.static_encoder(static)
+        dynamic_hidden = self.dynamic_encoder(dynamic)
 
-        step = 0
-        max_step = static.size(2) if self.mask_fn is None else 1000
-        while step < max_step and mask.byte().any():
+        for step in range(max_steps):
 
-            probs, last_hidden = self.decoder(static_enc, dynamic_enc,
-                                              last_output, last_hidden)
 
-            mask_var = Variable(mask, requires_grad=False)
-            probs = F.softmax(probs + mask_var.log(), dim=1)
+            if step > sequence_size * 3:
+                raise Exception('Should not happen')
+
+            if not mask.byte().any():
+                break
+
+            # ... but compute a hidden rep for each element added to sequence
+            decoder_hidden = self.decoder(decoder_input)
+
+            probs, last_hh = self.pointer(static_hidden,
+                                          dynamic_hidden,
+                                          decoder_hidden, last_hh)
+            probs = F.softmax(probs + mask.log(), dim=1)
 
             # When training, sample the next step according to its probability.
             # During testing, we can take the greedy approach and choose highest
             if self.training:
                 m = torch.distributions.Categorical(probs)
-                ptr = m.sample()
 
-                # Sometimes an issue with Categorical & sampling on GPU;
-                # ensure we're only sampling from indices defined by the mask
-                # See: https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
+                # Sometimes an issue with Categorical & sampling on GPU; See:
+                # https://github.com/pemami4911/neural-combinatorial-rl-pytorch/issues/5
+                ptr = m.sample()
                 while not torch.gather(mask, 1, ptr.data.unsqueeze(1)).byte().all():
                     ptr = m.sample()
                 logp = m.log_prob(ptr)
@@ -214,32 +235,21 @@ class DRL4VRP(nn.Module):
             tour_logp.append(logp.unsqueeze(1))
             tour_idx.append(ptr.data.unsqueeze(1))
 
-            view = ptr.view(-1, 1, 1).expand(-1, static.size(1), -1)
-            last_output = torch.gather(static, 2, view).squeeze(2)
+            decoder_input = torch.gather(static, 2,
+                                         ptr.view(-1, 1, 1)
+                                         .expand(-1, input_size, 1)).detach()
 
             if self.update_fn is not None:
                 dynamic = self.update_fn(dynamic, ptr.data)
-                dynamic_enc = self.dynamic_encoder(dynamic)
+                dynamic_hidden = self.dynamic_encoder(dynamic)
 
             if self.mask_fn is not None:
                 mask = self.mask_fn(mask, dynamic, ptr.data)
 
-            step = step + 1
-
         tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
-        tour_logp = torch.cat(tour_logp, dim=1).sum(1)  # (batch_size,)
+        tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
         return tour_idx, tour_logp
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    import numpy as np
-    rand = np.random.uniform(0, 1., (50, 2))
-    _, ax = plt.subplots(nrows=1, ncols=1,
-                         sharex='col', sharey='row')
-    ax.scatter(rand[:, 0], rand[:, 1], c='r', zorder=2)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    plt.tight_layout()
-    plt.show()
-    #raise Exception('Cannot be called from main')
+    raise Exception('Cannot be called from main')

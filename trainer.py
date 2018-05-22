@@ -14,10 +14,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.autograd import Variable
 from torch.utils.data import DataLoader
 
-from model import DRL4VRP, Encoder, Attention
+from model import DRL4TSP, Encoder, Attention
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#device = torch.device('cpu')
 
 
 class Critic(nn.Module):
@@ -27,94 +29,61 @@ class Critic(nn.Module):
     estimate how long it thinks a tour will be.
     """
 
-    def __init__(self, static_size, dynamic_size, hidden_size,
-                 num_process_iter, use_cuda):
+    def __init__(self, hidden_size):
         super(Critic, self).__init__()
 
-        # How many times we want to look at the input & update the context vec
-        self.num_process_iter = num_process_iter
-        self.use_cuda = use_cuda
-
         # Define the encoder & decoder models
-        self.static_encoder = Encoder(static_size, hidden_size)
-        self.dynamic_encoder = Encoder(dynamic_size, hidden_size)
-        self.attn = Attention(hidden_size)
-        self.fc1 = nn.Linear(hidden_size, 20)
-        self.fc2 = nn.Linear(20, 1)
+        self.fc1 = nn.Conv1d(1, hidden_size, kernel_size=1)
+        self.fc2 = nn.Conv1d(hidden_size, 20, kernel_size=1)
+        self.fc3 = nn.Conv1d(20, 1, kernel_size=1)
 
         for p in self.parameters():
             if len(p.shape) > 1:
-                nn.init.xavier_uniform(p)
+                nn.init.xavier_uniform_(p)
 
-    def forward(self, static, dynamic, initial_state):
+    def forward(self, input):
 
-        static_enc = self.static_encoder(static)
-        dynamic_enc = self.dynamic_encoder(dynamic)
-
-        batch_size, num_feats, _ = static_enc.size()
-
-        if initial_state is None:
-            # Use an empty context vector
-            if self.use_cuda:
-                x0 = torch.cuda.FloatTensor(1, batch_size, num_feats).fill_(0)
-            else:
-                x0 = torch.FloatTensor(1, batch_size, num_feats).fill_(0)
-            context = Variable(x0)
-        else:
-            # Pass initial state through an encoder
-            context = self.static_encoder(initial_state.unsqueeze(2))
-            context = context.permute(2, 0, 1)
-
-        static_p = static_enc.permute(0, 2, 1)
-        for _ in range(self.num_process_iter):
-
-            # Attention is applied across the static and dynamic states
-            attn = self.attn(static_enc, dynamic_enc, context)  # (B, 1, Seq)
-            context[0] = attn.bmm(static_p).squeeze(1)
-
-        output = F.relu(self.fc1(context.squeeze(0)))
-        output = self.fc2(output)
-
+        output = F.relu(self.fc1(input.unsqueeze(1)))
+        output = F.relu(self.fc2(output)).squeeze(2)
+        output = self.fc3(output).sum(dim=2)
         return F.elu(output)
 
 
-def validate(data_loader, actor, reward_fn, render_fn, save_dir, use_cuda):
+def validate(data_loader, actor, reward_fn, render_fn, save_dir):
     """Used to monitor progress on a validation set & optionally plot solution."""
 
     actor.eval()
 
-    rewards, indices, inputs = [], [], []
+    rewards = []
 
-    for batch_idx, batch in enumerate(data_loader):
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(data_loader):
 
-        static = Variable(batch[0].cuda() if use_cuda else batch[0])
-        dynamic = Variable(batch[1].cuda() if use_cuda else batch[1])
+            static, dynamic, x0 = batch
 
-        if len(batch[2]) > 0:
-            initial_state = Variable(batch[2].cuda() if use_cuda else batch[2])
-        else:
-            initial_state = None
+            static = static.to(device)
+            dynamic = dynamic.to(device)
+            x0 = x0.to(device) if x0 else None
 
-        # Full forward pass through the dataset
-        tour_indices, _ = actor.forward(static, dynamic, initial_state)
+            # Full forward pass through the dataset
+            tour_indices, _ = actor.forward(static, dynamic, x0)
 
-        reward = reward_fn(static, tour_indices, use_cuda)
+            reward = reward_fn(static, tour_indices)
 
-        # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
-        rewards.append(torch.mean(reward.data))
+            # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
+            rewards.append(torch.mean(reward.detach()))
 
-        if render_fn is not None and batch_idx < 50:
-            mean_reward = np.mean(rewards)
-            save_path = os.path.join(save_dir, '%2.4f_valid.png' % mean_reward)
-            render_fn(static, tour_indices, save_path)
+            if render_fn is not None and batch_idx < 50:
+                mean_reward = np.mean(rewards)
+                save_path = os.path.join(save_dir, '%2.4f_valid.png' % mean_reward)
+                render_fn(static, tour_indices, save_path)
 
     actor.train()
     return np.mean(rewards)
 
 
 def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
-          render_fn, batch_size, actor_lr, critic_lr,
-          max_grad_norm, plot_every, checkpoint_every, use_cuda):
+          render_fn, batch_size, actor_lr, critic_lr, max_grad_norm, checkpoint_every):
     """Constructs the main actor & critic networks, and performs all training."""
 
     save_dir = os.path.join(problem, '%d' % num_nodes)
@@ -128,10 +97,10 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
     actor_optim = optim.Adam(actor.parameters(), lr=actor_lr)
     critic_optim = optim.Adam(critic.parameters(), lr=critic_lr)
 
-    for epoch in range(100):
+    train_loader = DataLoader(train_data, batch_size, True, num_workers=0)
+    valid_loader = DataLoader(valid_data, batch_size, False, num_workers=0)
 
-        train_loader = DataLoader(train_data, batch_size, True, num_workers=0)
-        valid_loader = DataLoader(valid_data, batch_size, False, num_workers=0)
+    for epoch in range(100):
 
         actor.train()
         critic.train()
@@ -141,50 +110,39 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
 
             start = time.time()
 
-            static = Variable(batch[0].cuda() if use_cuda else batch[0])
-            dynamic = Variable(batch[1].cuda() if use_cuda else batch[1])
+            static, dynamic, x0 = batch
 
-            if len(batch[2]) > 0:
-                initial_state = batch[2]
-                if use_cuda:
-                    initial_state = initial_state.cuda()
-                initial_state = Variable(initial_state)
-            else:
-                initial_state = None
+            static = static.to(device).requires_grad_()
+            dynamic = dynamic.to(device).requires_grad_()
+            x0 = x0.to(device).requires_grad_() if len(x0) > 0 else None
 
             # Full forward pass through the dataset
-            tour_indices, logp_tour = actor.forward(static, dynamic,
-                                                    initial_state)
+            tour_indices, tour_logp = actor(static, dynamic, x0)
 
             # Sum the log probabilities for each city in the tour
-            reward = reward_fn(static, tour_indices, use_cuda)
+            reward = reward_fn(static, tour_indices)
 
             # Query the critic for an estimate of the reward
-            critic_est = critic(static, dynamic, initial_state).view(-1)
+            critic_in = torch.tensor(tour_logp.data, device=device, requires_grad=True)
+            critic_est = critic(critic_in).squeeze(1)
 
             advantage = (reward - critic_est)
-            actor_loss = torch.mean(advantage * logp_tour)
+            actor_loss = torch.mean(advantage.detach() * tour_logp.sum(dim=1))
             critic_loss = torch.mean(torch.pow(advantage, 2))
 
             actor_optim.zero_grad()
-            actor_loss.backward(retain_graph=True)
-            torch.nn.utils.clip_grad_norm(actor.parameters(),
-                                          max_grad_norm, norm_type=2)
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(actor.parameters(), max_grad_norm)
             actor_optim.step()
 
             critic_optim.zero_grad()
             critic_loss.backward()
-            torch.nn.utils.clip_grad_norm(critic.parameters(),
-                                          max_grad_norm, norm_type=2)
+            torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
             critic_optim.step()
 
             # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
-            rewards.append(torch.mean(reward.data))
-            losses.append(torch.mean(actor_loss.data))
-            if (render_fn is not None) and (batch_idx + 1) % plot_every == 0:
-
-                save_path = os.path.join(save_dir, '%d.png' % batch_idx)
-                render_fn(static, tour_indices, save_path)
+            rewards.append(torch.mean(reward.detach().data))
+            losses.append(torch.mean(actor_loss.detach().data))
 
             if (batch_idx + 1) % checkpoint_every == 0:
 
@@ -195,18 +153,25 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
                       (batch_idx, len(train_loader),
                        mean_reward, mean_loss, time.time() - start))
 
-                fname = 'batch%d_%2.4f_actor.pt' % (batch_idx, mean_reward)
+                fname = 'epoch%dbatch%d_%2.4f_actor.pt' %\
+                    (epoch, batch_idx, mean_reward)
                 save_path = os.path.join(checkpoint_dir, fname)
                 torch.save(actor.state_dict(), save_path)
 
-                fname = 'batch%d_%2.4f_critic.pt' % (batch_idx, mean_reward)
+                fname = 'epoch%dbatch%d_%2.4f_critic.pt' %\
+                    (epoch, batch_idx, mean_reward)
                 save_path = os.path.join(checkpoint_dir, fname)
                 torch.save(critic.state_dict(), save_path)
+
+                if render_fn is not None:
+                    save_path = os.path.join(save_dir, 'epoch%d_%d.png' %
+                                             (epoch, batch_idx))
+                    render_fn(static, tour_indices, save_path)
 
         mean_loss = np.mean(losses)
         mean_reward = np.mean(rewards)
 
-        mean_valid = validate(valid_loader, actor, reward_fn, render_fn, save_dir, use_cuda)
+        mean_valid = validate(valid_loader, actor, reward_fn, render_fn, save_dir)
 
         print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f' % (mean_loss, mean_reward, mean_valid))
 
@@ -220,22 +185,12 @@ def train_tsp():
     from tasks import tsp
     from tasks.tsp import TSPDataset
 
-    kwargs = {}
-
     # Problem - specific parameters
     train_size = 1000000
     valid_size = 1000
-    num_nodes = 10
-
+    num_nodes = 50
     train_data = TSPDataset(size=num_nodes, num_samples=train_size)
     valid_data = TSPDataset(size=num_nodes, num_samples=valid_size)
-    kwargs['train_data'] = train_data
-    kwargs['valid_data'] = valid_data
-    kwargs['reward_fn'] = tsp.reward
-    kwargs['render_fn'] = tsp.render
-    kwargs['problem'] = 'tsp'
-    mask_fn = tsp.update_mask
-    update_fn = None
 
     # Model - specific parameters
     static_size = 2
@@ -243,26 +198,25 @@ def train_tsp():
     hidden_size = 128
     dropout = 0.1
     num_layers = 1
-    use_cuda = torch.cuda.is_available()
-    num_process_iter = 3
 
-    actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn,
-                    mask_fn, dropout, num_layers, use_cuda)
-    critic = Critic(static_size, dynamic_size, hidden_size, num_process_iter,
-                    use_cuda)
-
-    if use_cuda:
-        actor.cuda()
-        critic.cuda()
-
+    kwargs = {}
+    kwargs['problem'] = 'tsp'
+    kwargs['train_data'] = train_data
+    kwargs['valid_data'] = valid_data
     kwargs['num_nodes'] = num_nodes
-    kwargs['batch_size'] = 64
-    kwargs['actor_lr'] = 5e-4
+    kwargs['batch_size'] = 2
+    kwargs['actor_lr'] = 1e-3
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['plot_every'] = 500
-    kwargs['checkpoint_every'] = 100
-    kwargs['use_cuda'] = use_cuda
+    kwargs['checkpoint_every'] = 1000
+    kwargs['reward_fn'] = tsp.reward
+    kwargs['render_fn'] = tsp.render
+    mask_fn = tsp.update_mask
+    update_fn = None
+
+    actor = DRL4TSP(static_size, dynamic_size, hidden_size, update_fn,
+                    mask_fn, num_layers, dropout).to(device)
+    critic = Critic(hidden_size).to(device)
 
     train(actor, critic, **kwargs)
 
@@ -274,59 +228,51 @@ def train_vrp():
     # VRP50, Capacity 40:  11.08 (BS) - 11.32 (Greedy)
     # VRP100, Capacity 50: 16.86 (BS) - 17.12 (Greedy)
 
+    CAPACITY_DICT = {10: 20, 20: 30, 50: 40, 100: 50}
+
     from tasks import vrp
     from tasks.vrp import VehicleRoutingDataset
 
-    kwargs = {}
-
     # Problem - specific parameters
-    train_size = 1000000
+    train_size = 1000
     valid_size = 1000
-    num_nodes = 10
-    max_load = 20
     max_demand = 9
-
+    num_nodes = 10
+    max_load = CAPACITY_DICT[num_nodes]
     train_data = VehicleRoutingDataset(train_size, num_nodes, max_load, max_demand)
     valid_data = VehicleRoutingDataset(valid_size, num_nodes, max_load, max_demand)
-    kwargs['train_data'] = train_data
-    kwargs['valid_data'] = valid_data
-    kwargs['reward_fn'] = vrp.reward
-    kwargs['render_fn'] = None  # vrp.render
-    kwargs['problem'] = 'vrp'
-    mask_fn = train_data.update_mask
-    update_fn = train_data.update_dynamic
 
     # Model - specific parameters
     static_size = 2
-    dynamic_size = 2
+    dynamic_size = static_size
     hidden_size = 128
     dropout = 0.1
     num_layers = 1
-    num_process_iter = 3
-    use_cuda = torch.cuda.is_available()
 
-    actor = DRL4VRP(static_size, dynamic_size, hidden_size, update_fn,
-                    mask_fn, dropout, num_layers, use_cuda)
-    critic = Critic(static_size, dynamic_size, hidden_size, num_process_iter,
-                    use_cuda)
-
-    if use_cuda:
-        actor.cuda()
-        critic.cuda()
-
+    kwargs = {}
+    kwargs['problem'] = 'vrp'
+    kwargs['train_data'] = train_data
+    kwargs['valid_data'] = valid_data
+    kwargs['reward_fn'] = vrp.reward
+    kwargs['render_fn'] = vrp.render
     kwargs['num_nodes'] = num_nodes
-    kwargs['batch_size'] = 1  # 64
-    kwargs['actor_lr'] = 5e-4
+    kwargs['batch_size'] = 2
+    kwargs['actor_lr'] = 1e-3
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['plot_every'] = 1
-    kwargs['checkpoint_every'] = 100000
-    kwargs['use_cuda'] = use_cuda
+    kwargs['checkpoint_every'] = 100
+
+    mask_fn = train_data.update_mask
+    update_fn = train_data.update_dynamic
+
+    actor = DRL4TSP(static_size, dynamic_size, hidden_size, update_fn,
+                    mask_fn, num_layers, dropout).to(device)
+    critic = Critic(hidden_size).to(device)
 
     train(actor, critic, **kwargs)
 
     '''
-    #path = 'vrp/50/checkpoints/batch13499_11.5925_'
+    # path = 'vrp/50/checkpoints/batch13499_11.5925_'
     path = 'vrp/50/checkpoints/batch499_11.6461_'
     params = torch.load(path + 'actor.pt', map_location=lambda storage, loc: storage)
     actor.load_state_dict(params)
@@ -337,5 +283,5 @@ def train_vrp():
 
 
 if __name__ == '__main__':
-    # train_vrp()
-    train_tsp()
+    train_vrp()
+    # train_tsp()
