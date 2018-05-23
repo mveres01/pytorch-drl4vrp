@@ -63,7 +63,7 @@ def validate(data_loader, actor, reward_fn, render_fn, save_dir):
 
             static = static.to(device)
             dynamic = dynamic.to(device)
-            x0 = x0.to(device) if x0 else None
+            x0 = x0.to(device) if len(x0) > 0 else None
 
             # Full forward pass through the dataset
             tour_indices, _ = actor.forward(static, dynamic, x0)
@@ -227,7 +227,7 @@ def train_vrp():
     from tasks.vrp import VehicleRoutingDataset
 
     # Problem - specific parameters
-    train_size = 1000
+    train_size = 1000000
     valid_size = 1000
     max_demand = 9
     num_nodes = 10
@@ -249,7 +249,7 @@ def train_vrp():
     kwargs['reward_fn'] = vrp.reward
     kwargs['render_fn'] = vrp.render
     kwargs['num_nodes'] = num_nodes
-    kwargs['batch_size'] = 2
+    kwargs['batch_size'] = 10
     kwargs['actor_lr'] = 1e-3
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.

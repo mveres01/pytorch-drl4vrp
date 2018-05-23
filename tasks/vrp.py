@@ -30,7 +30,6 @@ class VehicleRoutingDataset(Dataset):
 
         # Driver location will be the first node in each
         locations = torch.rand((num_samples, 2, input_size + 1))
-        locations[:, :, 0] = 0.
         self.static = locations
 
         # Vehicle needs a load > 0, which gets broadcasted to all states
@@ -118,30 +117,20 @@ class VehicleRoutingDataset(Dataset):
         # as much demand as possible
         if visit.any():
 
-            # Do all calculations using integers
-            load_int = (load * self.max_load).int().float()
-            demand_int = (demand * self.max_load).int().float()
+            new_load = torch.clamp(load - demand, min=0)
+            new_demand = torch.clamp(demand - load, min=0)
 
-            # new_load = max(0, load - demand)
-            new_load = torch.clamp(load_int - demand_int, min=0) / self.max_load
-
-            # new_demand = max(0, demand - load)
-            new_demand = torch.clamp(demand_int - load_int, min=0) / self.max_load
-            new_demand = demand.masked_scatter_(visit.unsqueeze(1), new_demand.squeeze(1))
-
-            # For the load we can just broadcase the same value to all nodes
+            # Broadcast the load to all nodes, but update demand seperately
             visit_idx = visit.nonzero().squeeze()
-            all_loads[visit_idx] = new_load[visit_idx]
-            all_demands.scatter_(1, chosen_idx.unsqueeze(1), new_demand)
 
-            # Need to update the depot demand to be (new_load - 1)
-            visit = visit.float()
-            all_demands[:, 0] = all_demands[:, 0] * (1 - visit) + (new_load[:, 0] - 1) * visit
+            all_loads[visit_idx] = new_load[visit_idx]
+            all_demands[visit_idx, chosen_idx[visit_idx]] = new_demand[visit_idx].view(-1)
+            all_demands[visit_idx, 0] = -1. + new_load[visit_idx].view(-1)
 
         # Return to depot to fill vehicle load
         if depot.any():
-            all_loads[depot.ne(0).squeeze()] = 1.
-            all_demands[depot.ne(0).squeeze(), 0] = 0.
+            all_loads[depot.nonzero().squeeze()] = 1.
+            all_demands[depot.nonzero().squeeze(), 0] = 0.
 
         tensor = torch.cat((all_loads.unsqueeze(1), all_demands.unsqueeze(1)), 1)
         return torch.tensor(tensor.data, device=dynamic.device, requires_grad=True)
@@ -224,7 +213,7 @@ def render(static, tour_indices, save_path):
         ax.set_ylim(0, 1)
 
     plt.tight_layout()
-    plt.savefig(save_path, bbox_inches='tight', dpi=400)
+    plt.savefig(save_path, bbox_inches='tight', dpi=200)
 
 
 '''
