@@ -34,7 +34,7 @@ class VehicleRoutingDataset(Dataset):
 
         # Vehicle needs a load > 0, which gets broadcasted to all states
         dynamic_shape = (num_samples, 1, input_size + 1)
-        loads = torch.full(dynamic_shape, max_load / float(max_load))
+        loads = torch.full(dynamic_shape, 1.)
 
         # Nodes are assigned a random demand in [1, max_demand)
         demands = torch.randint(1, max_demand + 1, dynamic_shape)
@@ -49,28 +49,18 @@ class VehicleRoutingDataset(Dataset):
         # (static, dynamic, start_loc)
         return (self.static[idx], self.dynamic[idx], self.static[idx, :, 0:1])
 
+    '''
     def update_mask(self, mask, dynamic, chosen_idx=None):
         """Updates the mask used to hide non-valid states.
-
-        Note that all math is done using integers to avoid float errors
 
         Parameters
         ----------
         dynamic: torch.autograd.Variable of size (1, num_feats, seq_len)
         """
 
-        '''
-        if dynamic.is_cuda:
-            depot_mask = torch.cuda.FloatTensor(1, mask.size(1)).fill_(0)
-        else:
-            depot_mask = torch.FloatTensor(1, mask.size(1)).fill_(0)
-        '''
-
-        dint = (self.max_load * dynamic.data).int()
-
         # Convert floating point to integers for calculations
-        loads = dint[:, 0]  # (batch_size, seq_len)
-        demands = dint[:, 1]  # (batch_size, seq_len)
+        loads = dynamic.data[:, 0]  # (batch_size, seq_len)
+        demands = dynamic.data[:, 1]  # (batch_size, seq_len)
 
         # If there is no positive demand left, we can end the tour.
         # Note that the first node is the depot, which always has a negative demand
@@ -82,6 +72,7 @@ class VehicleRoutingDataset(Dataset):
 
         # We should avoid traveling to the depot back-to-back
         repeat_home = chosen_idx.ne(0)
+
         if repeat_home.any():
             new_mask[repeat_home, 0] = 1.
         if (1 - repeat_home).any():
@@ -97,6 +88,46 @@ class VehicleRoutingDataset(Dataset):
             new_mask[combined, 1:] = 0.
 
         return new_mask.float()
+    '''
+
+    def update_mask(self, mask, dynamic, chosen_idx=None):
+        """Updates the mask used to hide non-valid states.
+
+        Parameters
+        ----------
+        dynamic: torch.autograd.Variable of size (1, num_feats, seq_len)
+        """
+
+        # Convert floating point to integers for calculations
+        loads = dynamic.data[:, 0]  # (batch_size, seq_len)
+        demands = dynamic.data[:, 1]  # (batch_size, seq_len)
+
+        # If there is no positive demand left, we can end the tour.
+        # Note that the first node is the depot, which always has a negative demand
+        if demands[:, 1:].eq(0).all():
+            return demands * 0.
+
+        # Otherwise, we can choose to go anywhere where demand is > 0
+        new_mask = demands.ne(0)
+
+        # We should avoid traveling to the depot back-to-back
+        repeat_home = chosen_idx.ne(0)
+
+        if repeat_home.any():
+            new_mask[repeat_home.nonzero(), 0] = 1.
+        if (1 - repeat_home).any():
+            new_mask[(1 - repeat_home).nonzero(), 0] = 0.
+
+        # ... unless we're waiting for all other samples in a minibatch to finish
+        has_no_load = loads[:, 0].eq(0).float()
+        has_no_demand = demands[:, 1:].sum(1).eq(0).float()
+
+        combined = (has_no_load + has_no_demand).gt(0)
+        if combined.any():
+            new_mask[combined.nonzero(), 0] = 1.
+            new_mask[combined.nonzero(), 1:] = 0.
+
+        return new_mask.float()
 
     def update_dynamic(self, dynamic, chosen_idx):
         """Updates the (load, demand) dataset values."""
@@ -106,9 +137,8 @@ class VehicleRoutingDataset(Dataset):
         depot = chosen_idx.eq(0)
 
         # Clone the dynamic variable so we don't mess up graph
-        tensor = dynamic.clone()
-        all_loads = tensor[:, 0]
-        all_demands = tensor[:, 1]
+        all_loads = dynamic[:, 0].clone()
+        all_demands = dynamic[:, 1].clone()
 
         load = torch.gather(all_loads, 1, chosen_idx.unsqueeze(1))
         demand = torch.gather(all_demands, 1, chosen_idx.unsqueeze(1))
@@ -141,25 +171,20 @@ def reward(static, tour_indices):
     Euclidean distance between all cities / nodes given by tour_indices
     """
 
-    tour_len = []
+    # Convert the indices back into a tour
+    idx = tour_indices.unsqueeze(1).expand(-1, static.size(1), -1)
+    tour = torch.gather(static.data, 2, idx).permute(0, 2, 1)
 
-    for i in range(static.size(0)):
+    # Ensure we're always returning to the depot - note the extra concat
+    # won't add any extra loss, as the euclidean distance between consecutive
+    # points is 0
+    start = static.data[:, :, 0].unsqueeze(1)
+    y = torch.cat((start, tour, start), dim=1)
 
-        # Convert the indices back into a tour
-        idx = tour_indices[i].unsqueeze(0).unsqueeze(1).expand(-1, static.size(1), -1)
-        tour = torch.gather(static[i:i + 1].data, 2, idx).permute(0, 2, 1)
+    # Euclidean distance between each consecutive point
+    tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
-        # Ensure we're always returning to the depot - note the extra concat
-        # won't add any extra loss, as the euclidean disistance between consecutive
-        # points is 0
-        start = static.data[i:i + 1, :, 0].unsqueeze(1)
-        y = torch.cat((start, tour, start), dim=1)
-
-        # Euclidean distance between each consecutive point
-        dist = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
-        tour_len.append(dist.sum(1))
-
-    return torch.tensor(torch.cat(tour_len), device=static.device)
+    return tour_len.sum(1)
 
 
 def render(static, tour_indices, save_path):

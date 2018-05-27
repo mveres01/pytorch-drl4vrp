@@ -46,7 +46,7 @@ class Critic(nn.Module):
         output = F.relu(self.fc1(input.unsqueeze(1)))
         output = F.relu(self.fc2(output)).squeeze(2)
         output = self.fc3(output).sum(dim=2)
-        return F.elu(output)
+        return output
 
 
 def validate(data_loader, actor, reward_fn, render_fn, save_dir):
@@ -103,10 +103,10 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
         actor.train()
         critic.train()
 
-        start = time.time()
-
-        losses, rewards = [], []
+        losses, rewards, critic_rewards = [], [], []
         for batch_idx, batch in enumerate(train_loader):
+
+            start = time.time()
 
             static, dynamic, x0 = batch
 
@@ -139,6 +139,7 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
             critic_optim.step()
 
             # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
+            critic_rewards.append(torch.mean(critic_est.detach().data))
             rewards.append(torch.mean(reward.detach().data))
             losses.append(torch.mean(actor_loss.detach().data))
 
@@ -146,6 +147,7 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
 
                 mean_loss = np.mean(losses[-checkpoint_every:])
                 mean_reward = np.mean(rewards[-checkpoint_every:])
+                mean_critic_reward = np.mean(critic_rewards[-checkpoint_every:])
 
                 prefix = 'epoch%dbatch%d_%2.4f' % (epoch, batch_idx, mean_reward)
                 save_path = os.path.join(checkpoint_dir, prefix + '_actor.pt')
@@ -159,9 +161,9 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
                                              (epoch, batch_idx))
                     render_fn(static, tour_indices, save_path)
 
-                print('%d/%d, avg. reward: %2.4f, loss: %2.4f, took: %2.4fs' %
+                print('%d/%d, reward: %2.3f, pred: %2.3f, loss: %2.4f, took: %2.4fs' %
                       (batch_idx, len(train_loader),
-                       mean_reward, mean_loss, time.time() - start))
+                       mean_reward, mean_critic_reward,  mean_loss, time.time() - start))
 
         mean_loss = np.mean(losses)
         mean_reward = np.mean(rewards)
@@ -230,14 +232,14 @@ def train_vrp():
     train_size = 1000000
     valid_size = 1000
     max_demand = 9
-    num_nodes = 10
+    num_nodes = 50
     max_load = CAPACITY_DICT[num_nodes]
     train_data = VehicleRoutingDataset(train_size, num_nodes, max_load, max_demand)
     valid_data = VehicleRoutingDataset(valid_size, num_nodes, max_load, max_demand)
 
     # Model - specific parameters
     static_size = 2
-    dynamic_size = static_size
+    dynamic_size = 2 # (load, demand)
     hidden_size = 128
     dropout = 0.1
     num_layers = 1
@@ -249,11 +251,11 @@ def train_vrp():
     kwargs['reward_fn'] = vrp.reward
     kwargs['render_fn'] = vrp.render
     kwargs['num_nodes'] = num_nodes
-    kwargs['batch_size'] = 10
+    kwargs['batch_size'] = 200
     kwargs['actor_lr'] = 1e-3
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['checkpoint_every'] = 100
+    kwargs['checkpoint_every'] = 1000
 
     mask_fn = train_data.update_mask
     update_fn = train_data.update_dynamic
