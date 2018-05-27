@@ -209,8 +209,16 @@ class DRL4TSP(nn.Module):
                 prob, ptr = torch.max(probs, 1)  # Greedy
                 logp = prob.log()
 
-            is_done = dynamic[:, 1, 1:].sum(1).eq(0).float()
-            logp = logp * (1. - is_done)
+            # Update the dynamic elements and mask
+            if self.update_fn is not None:
+                is_done = dynamic[:, 1, 1:].sum(1).eq(0).float()
+                logp = logp * (1. - is_done)
+
+                dynamic = self.update_fn(dynamic, ptr.data)
+                dynamic_hidden = self.dynamic_encoder(dynamic)
+
+            if self.mask_fn is not None:
+                mask = self.mask_fn(mask, dynamic, ptr.data).detach()
 
             tour_logp.append(logp.unsqueeze(1))
             tour_idx.append(ptr.data.unsqueeze(1))
@@ -218,13 +226,6 @@ class DRL4TSP(nn.Module):
             decoder_input = torch.gather(static, 2,
                                          ptr.view(-1, 1, 1)
                                          .expand(-1, input_size, 1)).detach()
-
-            if self.update_fn is not None:
-                dynamic = self.update_fn(dynamic, ptr.data)
-                dynamic_hidden = self.dynamic_encoder(dynamic)
-
-            if self.mask_fn is not None:
-                mask = self.mask_fn(mask, dynamic, ptr.data).detach()
 
         tour_idx = torch.cat(tour_idx, dim=1)  # (batch_size, seq_len)
         tour_logp = torch.cat(tour_logp, dim=1)  # (batch_size, seq_len)
