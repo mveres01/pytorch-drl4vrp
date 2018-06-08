@@ -168,8 +168,7 @@ class DRL4TSP(nn.Module):
             decoder_input = self.x0.expand(batch_size, -1, -1)
 
         # Always use a mask - if no function is provided, we don't update it
-        mask = torch.ones(batch_size, sequence_size,
-                          device=device, requires_grad=False)
+        mask = torch.ones(batch_size, sequence_size, device=device)
 
         # Structures for holding the output sequences
         tour_idx, tour_logp = [], []
@@ -209,13 +208,15 @@ class DRL4TSP(nn.Module):
                 prob, ptr = torch.max(probs, 1)  # Greedy
                 logp = prob.log()
 
-            # Update the dynamic elements and mask
             if self.update_fn is not None:
-                is_done = dynamic[:, 1, 1:].sum(1).eq(0).float()
-                logp = logp * (1. - is_done)
-
                 dynamic = self.update_fn(dynamic, ptr.data)
                 dynamic_hidden = self.dynamic_encoder(dynamic)
+
+                # Since we compute the VRP in minibatches, some tours may have
+                # number of stops. We force the vehicles to remain at the depot 
+                # in these cases, and logp := 0
+                is_done = dynamic[:, 1, 1:].sum(1).eq(0).float()
+                logp = logp * (1. - is_done)
 
             if self.mask_fn is not None:
                 mask = self.mask_fn(mask, dynamic, ptr.data).detach()

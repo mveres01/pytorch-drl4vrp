@@ -49,32 +49,33 @@ class Critic(nn.Module):
         return output
 
 
-def validate(data_loader, actor, reward_fn, render_fn, save_dir):
+def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.', 
+             num_plot=5):
     """Used to monitor progress on a validation set & optionally plot solution."""
 
     actor.eval()
 
     rewards = []
+    for batch_idx, batch in enumerate(data_loader):
 
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(data_loader):
+        static, dynamic, x0 = batch
 
-            static, dynamic, x0 = batch
+        static = static.to(device)
+        dynamic = dynamic.to(device)
+        x0 = x0.to(device) if len(x0) > 0 else None
 
-            static = static.to(device)
-            dynamic = dynamic.to(device)
-            x0 = x0.to(device) if len(x0) > 0 else None
+        # Full forward pass through the dataset
+        with torch.no_grad():
 
-            # Full forward pass through the dataset
             tour_indices, _ = actor.forward(static, dynamic, x0)
 
-            reward = reward_fn(static, tour_indices)
-            rewards.append(torch.mean(reward.detach()))
+            reward = reward_fn(static, tour_indices).detach()
+            rewards.append(torch.mean(reward)) 
 
-            if render_fn is not None and batch_idx < 50:
-                mean_reward = np.mean(rewards)
-                save_path = os.path.join(save_dir, '%2.4f_valid.png' % mean_reward)
-                render_fn(static, tour_indices, save_path)
+            if render_fn is not None and batch_idx < num_plot:
+                name = 'batch%d_%2.4f.png'%(batch_idx, reward.mean())
+                path = os.path.join(save_dir, name)
+                render_fn(static, tour_indices, path)
 
     actor.train()
     return np.mean(rewards)
@@ -87,8 +88,6 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
     save_dir = os.path.join(problem, '%d' % num_nodes)
     checkpoint_dir = os.path.join(save_dir, 'checkpoints')
 
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
@@ -105,8 +104,6 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
 
         losses, rewards, critic_rewards = [], [], []
         for batch_idx, batch in enumerate(train_loader):
-
-            start = time.time()
 
             static, dynamic, x0 = batch
 
@@ -147,33 +144,29 @@ def train(actor, critic, problem, num_nodes, train_data, valid_data, reward_fn,
 
                 mean_loss = np.mean(losses[-checkpoint_every:])
                 mean_reward = np.mean(rewards[-checkpoint_every:])
-                mean_critic_reward = np.mean(critic_rewards[-checkpoint_every:])
 
-                prefix = 'epoch%dbatch%d_%2.4f' % (epoch, batch_idx, mean_reward)
+                prefix = 'epoch%d_batch%d_%2.4f' % (epoch, batch_idx, mean_reward)
                 save_path = os.path.join(checkpoint_dir, prefix + '_actor.pt')
                 torch.save(actor.state_dict(), save_path)
 
                 save_path = os.path.join(checkpoint_dir, prefix + '_critic.pt')
                 torch.save(critic.state_dict(), save_path)
 
-                if render_fn is not None:
-                    save_path = os.path.join(save_dir, 'epoch%d_%d.png' %
-                                             (epoch, batch_idx))
-                    render_fn(static, tour_indices, save_path)
-
-                print('%d/%d, reward: %2.3f, pred: %2.3f, loss: %2.4f, took: %2.4fs' %
-                      (batch_idx, len(train_loader),
-                       mean_reward, mean_critic_reward,  mean_loss, time.time() - start))
+                print('%d/%d, reward: %2.3f, loss: %2.4f' %
+                      (batch_idx, len(train_loader), mean_reward, mean_loss))
 
         mean_loss = np.mean(losses)
         mean_reward = np.mean(rewards)
-        mean_valid = validate(valid_loader, actor, reward_fn, render_fn, save_dir)
+        mean_valid = validate(valid_loader, actor, reward_fn, render_fn,
+                              save_dir, num_plot=5)
 
-        print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f' % (mean_loss, mean_reward, mean_valid))
+        print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f' % \
+              (mean_loss, mean_reward, mean_valid))
 
 
 def train_tsp():
 
+    # Goals:
     # TSP20, 3.82  (Optimal) - 3.97  (DRL4VRP)
     # TSP50, 5.70  (Optimal) - 6.08  (DRL4VRP)
     # TSP100, 7.77 (OptimalBS) - 8.44 (DRL4VRP)
@@ -181,7 +174,7 @@ def train_tsp():
     from tasks import tsp
     from tasks.tsp import TSPDataset
 
-    train_size = 1000000
+    train_size = 10000
     valid_size = 1000
     num_nodes = 50
     train_data = TSPDataset(size=num_nodes, num_samples=train_size)
@@ -218,6 +211,7 @@ def train_tsp():
 
 def train_vrp():
 
+    # Goals:
     # VRP10, Capacity 20:  4.65  (BS) - 4.80  (Greedy)
     # VRP20, Capacity 30:  6.34  (BS) - 6.51  (Greedy)
     # VRP50, Capacity 40:  11.08 (BS) - 11.32 (Greedy)
@@ -229,7 +223,7 @@ def train_vrp():
     from tasks.vrp import VehicleRoutingDataset
 
     # Problem - specific parameters
-    train_size = 1000000
+    train_size = 100000
     valid_size = 1000
     max_demand = 9
     num_nodes = 50
@@ -255,7 +249,7 @@ def train_vrp():
     kwargs['actor_lr'] = 1e-3
     kwargs['critic_lr'] = kwargs['actor_lr']
     kwargs['max_grad_norm'] = 2.
-    kwargs['checkpoint_every'] = 1000
+    kwargs['checkpoint_every'] = 500
 
     mask_fn = train_data.update_mask
     update_fn = train_data.update_dynamic
