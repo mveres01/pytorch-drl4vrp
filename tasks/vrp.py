@@ -49,47 +49,6 @@ class VehicleRoutingDataset(Dataset):
         # (static, dynamic, start_loc)
         return (self.static[idx], self.dynamic[idx], self.static[idx, :, 0:1])
 
-    '''
-    def update_mask(self, mask, dynamic, chosen_idx=None):
-        """Updates the mask used to hide non-valid states.
-
-        Parameters
-        ----------
-        dynamic: torch.autograd.Variable of size (1, num_feats, seq_len)
-        """
-
-        # Convert floating point to integers for calculations
-        loads = dynamic.data[:, 0]  # (batch_size, seq_len)
-        demands = dynamic.data[:, 1]  # (batch_size, seq_len)
-
-        # If there is no positive demand left, we can end the tour.
-        # Note that the first node is the depot, which always has a negative demand
-        if demands[:, 1:].eq(0).all():
-            return demands * 0.
-
-        # Otherwise, we can choose to go anywhere where demand is > 0
-        new_mask = demands.ne(0)
-
-        # We should avoid traveling to the depot back-to-back
-        repeat_home = chosen_idx.ne(0)
-
-        if repeat_home.any():
-            new_mask[repeat_home, 0] = 1.
-        if (1 - repeat_home).any():
-            new_mask[1 - repeat_home, 0] = 0.
-
-        # ... unless we're waiting for all other samples in a minibatch to finish
-        has_no_load = loads[:, 0].eq(0).float()
-        has_no_demand = demands[:, 1:].sum(1).eq(0).float()
-
-        combined = (has_no_load + has_no_demand).gt(0)
-        if combined.any():
-            new_mask[combined, 0] = 1.
-            new_mask[combined, 1:] = 0.
-
-        return new_mask.float()
-    '''
-
     def update_mask(self, mask, dynamic, chosen_idx=None):
         """Updates the mask used to hide non-valid states.
 
