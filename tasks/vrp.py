@@ -22,6 +22,7 @@ class VehicleRoutingDataset(Dataset):
         if max_load < max_demand:
             raise ValueError(':param max_load: must be > max_demand')
 
+        np.random.seed(seed)
         torch.manual_seed(seed)
 
         self.num_samples = num_samples
@@ -63,7 +64,7 @@ class VehicleRoutingDataset(Dataset):
 
         # If there is no positive demand left, we can end the tour.
         # Note that the first node is the depot, which always has a negative demand
-        if demands[:, 1:].eq(0).all():
+        if demands.eq(0).all():
             return demands * 0.
 
         # Otherwise, we can choose to go anywhere where demand is > 0

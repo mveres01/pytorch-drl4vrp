@@ -22,6 +22,7 @@ class TSPDataset(Dataset):
     def __init__(self, size=50, num_samples=1e6, seed=1234):
         super(TSPDataset, self).__init__()
 
+        np.random.seed(seed)
         torch.manual_seed(seed)
         self.dataset = torch.rand((num_samples, 2, size))
         self.dynamic = torch.zeros(num_samples, 1, size)

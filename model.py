@@ -208,6 +208,7 @@ class DRL4TSP(nn.Module):
                 prob, ptr = torch.max(probs, 1)  # Greedy
                 logp = prob.log()
 
+            # After visiting a node update the dynamic representation
             if self.update_fn is not None:
                 dynamic = self.update_fn(dynamic, ptr.data)
                 dynamic_hidden = self.dynamic_encoder(dynamic)
@@ -215,9 +216,10 @@ class DRL4TSP(nn.Module):
                 # Since we compute the VRP in minibatches, some tours may have
                 # number of stops. We force the vehicles to remain at the depot 
                 # in these cases, and logp := 0
-                is_done = dynamic[:, 1, 1:].sum(1).eq(0).float()
+                is_done = dynamic[:, 1].sum(1).eq(0).float()
                 logp = logp * (1. - is_done)
 
+            # And update the mask so we don't re-visit if we don't need to
             if self.mask_fn is not None:
                 mask = self.mask_fn(mask, dynamic, ptr.data).detach()
 
