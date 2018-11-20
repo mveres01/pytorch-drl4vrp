@@ -6,6 +6,7 @@ The VRP is defined by the following traits:
     3. When the vehicle load is 0, it __must__ return to the depot to refill
 """
 
+import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -16,12 +17,15 @@ import matplotlib.pyplot as plt
 
 
 class VehicleRoutingDataset(Dataset):
-    def __init__(self, num_samples, input_size, max_load=20, max_demand=9, seed=1234):
+    def __init__(self, num_samples, input_size, max_load=20, max_demand=9,
+                 seed=None):
         super(VehicleRoutingDataset, self).__init__()
 
         if max_load < max_demand:
             raise ValueError(':param max_load: must be > max_demand')
 
+        if seed is None:
+            seed = np.random.randint(1234567890)
         np.random.seed(seed)
         torch.manual_seed(seed)
 
@@ -29,17 +33,22 @@ class VehicleRoutingDataset(Dataset):
         self.max_load = max_load
         self.max_demand = max_demand
 
-        # Driver location will be the first node in each
+        # Depot location will be the first node in each
         locations = torch.rand((num_samples, 2, input_size + 1))
         self.static = locations
 
-        # Vehicle needs a load > 0, which gets broadcasted to all states
+        # All states will broadcast the drivers current load
+        # Note that we only use a load between [0, 1] to prevent large
+        # numbers entering the neural network
         dynamic_shape = (num_samples, 1, input_size + 1)
         loads = torch.full(dynamic_shape, 1.)
 
-        # Nodes are assigned a random demand in [1, max_demand)
+        # All states will have their own intrinsic demand in [1, max_demand), 
+        # then scaled by the maximum load. E.g. if load=10 and max_demand=30, 
+        # demands will be scaled to the range (0, 3)
         demands = torch.randint(1, max_demand + 1, dynamic_shape)
         demands = demands / float(max_load)
+
         demands[:, 0, 0] = 0  # depot starts with a demand of 0
         self.dynamic = torch.tensor(np.concatenate((loads, demands), axis=1))
 
@@ -68,7 +77,7 @@ class VehicleRoutingDataset(Dataset):
             return demands * 0.
 
         # Otherwise, we can choose to go anywhere where demand is > 0
-        new_mask = demands.ne(0)
+        new_mask = demands.ne(0) * demands.lt(loads)
 
         # We should avoid traveling to the depot back-to-back
         repeat_home = chosen_idx.ne(0)
@@ -123,7 +132,7 @@ class VehicleRoutingDataset(Dataset):
             all_demands[depot.nonzero().squeeze(), 0] = 0.
 
         tensor = torch.cat((all_loads.unsqueeze(1), all_demands.unsqueeze(1)), 1)
-        return torch.tensor(tensor.data, device=dynamic.device, requires_grad=True)
+        return torch.tensor(tensor.data, device=dynamic.device)
 
 
 def reward(static, tour_indices):
@@ -159,7 +168,6 @@ def render(static, tour_indices, save_path):
 
     if num_plots == 1:
         axes = [[axes]]
-
     axes = [a for ax in axes for a in ax]
 
     for i, ax in enumerate(axes):

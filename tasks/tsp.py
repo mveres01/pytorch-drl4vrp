@@ -4,11 +4,12 @@ The TSP is defined by the following traits:
     1. Each city in the list must be visited once and only once
     2. The salesman must return to the original node at the end of the tour
 
-Since the TSP doesn't have dynamic elements, we return an empty list on 
+Since the TSP doesn't have dynamic elements, we return an empty list on
 __getitem__, which gets processed in trainer.py to be None
 
 """
 
+import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -19,8 +20,11 @@ import matplotlib.pyplot as plt
 
 class TSPDataset(Dataset):
 
-    def __init__(self, size=50, num_samples=1e6, seed=1234):
+    def __init__(self, size=50, num_samples=1e6, seed=None):
         super(TSPDataset, self).__init__()
+
+        if seed is None:
+            seed = np.random.randint(123456789)
 
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -47,13 +51,12 @@ def reward(static, tour_indices):
     """
     Parameters
     ----------
+    static: torch.FloatTensor containing static (e.g. x, y) data
     tour_indices: torch.IntTensor of size (batch_size, num_cities)
-    use_cuda: whether to put the found solutions on the GPU. Might not be needed 
-        for all problems, but acts as a placemholder for solutions that will.
 
     Returns
     -------
-    Euclidean distance between consecutive nodes on the route of size 
+    Euclidean distance between consecutive nodes on the route. of size
     (batch_size, num_cities)
     """
 
@@ -67,7 +70,7 @@ def reward(static, tour_indices):
     # Euclidean distance between each consecutive point
     tour_len = torch.sqrt(torch.sum(torch.pow(y[:, :-1] - y[:, 1:], 2), dim=2))
 
-    return torch.tensor(tour_len.sum(1), dtype=torch.float, device=static.device)
+    return tour_len.sum(1).detach()
 
 
 def render(static, tour_indices, save_path):

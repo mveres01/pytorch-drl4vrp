@@ -27,7 +27,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 class StateCritic(nn.Module):
     """Estimates the problem complexity.
 
-    This is a basic module that just looks at the log-probabilities predicted by 
+    This is a basic module that just looks at the log-probabilities predicted by
     the encoder + decoder, and returns an estimate of complexity
     """
 
@@ -41,14 +41,14 @@ class StateCritic(nn.Module):
         self.fc1 = nn.Conv1d(hidden_size * 2, 20, kernel_size=1)
         self.fc2 = nn.Conv1d(20, 20, kernel_size=1)
         self.fc3 = nn.Conv1d(20, 1, kernel_size=1)
-        
+
         for p in self.parameters():
             if len(p.shape) > 1:
                 nn.init.xavier_uniform_(p)
 
     def forward(self, static, dynamic):
 
-        # Use the probabilities of visiting each 
+        # Use the probabilities of visiting each
         static_hidden = self.static_encoder(static)
         dynamic_hidden = self.dynamic_encoder(dynamic)
 
@@ -63,7 +63,7 @@ class StateCritic(nn.Module):
 class Critic(nn.Module):
     """Estimates the problem complexity.
 
-    This is a basic module that just looks at the log-probabilities predicted by 
+    This is a basic module that just looks at the log-probabilities predicted by
     the encoder + decoder, and returns an estimate of complexity
     """
 
@@ -87,11 +87,14 @@ class Critic(nn.Module):
         return output
 
 
-def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.', 
+def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.',
              num_plot=5):
     """Used to monitor progress on a validation set & optionally plot solution."""
 
     actor.eval()
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     rewards = []
     for batch_idx, batch in enumerate(data_loader):
@@ -102,18 +105,16 @@ def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.',
         dynamic = dynamic.to(device)
         x0 = x0.to(device) if len(x0) > 0 else None
 
-        # Full forward pass through the dataset
         with torch.no_grad():
-
             tour_indices, _ = actor.forward(static, dynamic, x0)
 
-            reward = reward_fn(static, tour_indices).detach()
-            rewards.append(torch.mean(reward)) 
+        reward = reward_fn(static, tour_indices).mean().item()
+        rewards.append(reward)
 
-            if render_fn is not None and batch_idx < num_plot:
-                name = 'batch%d_%2.4f.png'%(batch_idx, reward.mean())
-                path = os.path.join(save_dir, name)
-                render_fn(static, tour_indices, path)
+        if render_fn is not None and batch_idx < num_plot:
+            name = 'batch%d_%2.4f.png'%(batch_idx, reward)
+            path = os.path.join(save_dir, name)
+            render_fn(static, tour_indices, path)
 
     actor.train()
     return np.mean(rewards)
@@ -121,46 +122,43 @@ def validate(data_loader, actor, reward_fn, render_fn=None, save_dir='.',
 
 def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
           render_fn, batch_size, actor_lr, critic_lr, max_grad_norm,
-          checkpoint_every, **kwargs):
+          **kwargs):
     """Constructs the main actor & critic networks, and performs all training."""
 
     now = '%s' % datetime.datetime.now().time()
     now = now.replace(':', '_')
     save_dir = os.path.join(task, '%d' % num_nodes, now)
-    
-    checkpoint_dir = os.path.join(save_dir, 'checkpoints')
 
+    checkpoint_dir = os.path.join(save_dir, 'checkpoints')
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
-    if kwargs['optimizer'] == 'sgd':
-        optimizer = optim.SGD
-    elif kwargs['optimizer'] == 'adam':
-        optimizer = optim.Adam
-    elif kwargs['optimizer'] == 'adagrad':
-        optimizer = optim.Adagrad
-    else:
-        raise ValueError('Optimizer <%s> not understood'%kwargs['optimizer'])
-
-    actor_optim = optimizer(actor.parameters(), lr=actor_lr)
-    critic_optim = optimizer(critic.parameters(), lr=critic_lr)
+    actor_optim = optim.Adam(actor.parameters(), lr=actor_lr)
+    critic_optim = optim.Adam(critic.parameters(), lr=critic_lr)
 
     train_loader = DataLoader(train_data, batch_size, True, num_workers=0)
     valid_loader = DataLoader(valid_data, batch_size, False, num_workers=0)
+
+    best_params = None
+    best_reward = np.inf
 
     for epoch in range(20):
 
         actor.train()
         critic.train()
 
-        losses, rewards, critic_rewards = [], [], []
+        times, losses, rewards, critic_rewards = [], [], [], []
+
+        epoch_start = time.time()
+        start = epoch_start
+
         for batch_idx, batch in enumerate(train_loader):
 
             static, dynamic, x0 = batch
 
-            static = static.to(device).requires_grad_()
-            dynamic = dynamic.to(device).requires_grad_()
-            x0 = x0.to(device).requires_grad_() if len(x0) > 0 else None
+            static = static.to(device)
+            dynamic = dynamic.to(device)
+            x0 = x0.to(device) if len(x0) > 0 else None
 
             # Full forward pass through the dataset
             tour_indices, tour_logp = actor(static, dynamic, x0)
@@ -169,13 +167,11 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
             reward = reward_fn(static, tour_indices)
 
             # Query the critic for an estimate of the reward
-            #critic_in = torch.tensor(tour_logp.data, device=device, requires_grad=True)
-            #critic_est = critic(critic_in).view(-1)
             critic_est = critic(static, dynamic).view(-1)
 
             advantage = (reward - critic_est)
             actor_loss = torch.mean(advantage.detach() * tour_logp.sum(dim=1))
-            critic_loss = torch.mean(torch.pow(advantage, 2))
+            critic_loss = torch.mean(advantage ** 2)
 
             actor_optim.zero_grad()
             actor_loss.backward()
@@ -187,79 +183,120 @@ def train(actor, critic, task, num_nodes, train_data, valid_data, reward_fn,
             torch.nn.utils.clip_grad_norm_(critic.parameters(), max_grad_norm)
             critic_optim.step()
 
-            # GOALS: TSP_20=3.97, TSP_50=6.08, TSP_100=8.44
-            critic_rewards.append(torch.mean(critic_est.detach().data))
-            rewards.append(torch.mean(reward.detach().data))
-            losses.append(torch.mean(actor_loss.detach().data))
+            critic_rewards.append(torch.mean(critic_est.detach()).item())
+            rewards.append(torch.mean(reward.detach()).item())
+            losses.append(torch.mean(actor_loss.detach()).item())
 
-            if (batch_idx + 1) % checkpoint_every == 0:
+            if (batch_idx + 1) % 100 == 0:
+                end = time.time()
+                times.append(end - start)
+                start = end
 
-                mean_loss = np.mean(losses[-checkpoint_every:])
-                mean_reward = np.mean(rewards[-checkpoint_every:])
+                mean_loss = np.mean(losses[-100:])
+                mean_reward = np.mean(rewards[-100:])
 
-                prefix = 'epoch%d_batch%d_%2.4f' % (epoch, batch_idx, mean_reward)
-                save_path = os.path.join(checkpoint_dir, prefix + '_actor.pt')
-                torch.save(actor.state_dict(), save_path)
-
-                save_path = os.path.join(checkpoint_dir, prefix + '_critic.pt')
-                torch.save(critic.state_dict(), save_path)
-
-                print('%d/%d, reward: %2.3f, loss: %2.4f' %
-                      (batch_idx, len(train_loader), mean_reward, mean_loss))
+                print('  Batch %d/%d, reward: %2.3f, loss: %2.4f, took: %2.4fs' %
+                      (batch_idx, len(train_loader), mean_reward, mean_loss,
+                       times[-1]))
 
         mean_loss = np.mean(losses)
         mean_reward = np.mean(rewards)
-        mean_valid = validate(valid_loader, actor, reward_fn, render_fn,
-                              save_dir, num_plot=5)
 
-        print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f' % \
-              (mean_loss, mean_reward, mean_valid))
+        # Save the weights
+        epoch_dir = os.path.join(checkpoint_dir, '%s' % epoch)
+        if not os.path.exists(epoch_dir):
+            os.makedirs(epoch_dir)
+
+        save_path = os.path.join(epoch_dir, 'actor.pt')
+        torch.save(actor.state_dict(), save_path)
+
+        save_path = os.path.join(epoch_dir, 'critic.pt')
+        torch.save(critic.state_dict(), save_path)
+
+        # Save rendering of validation set tours
+        valid_dir = os.path.join(save_dir, '%s' % epoch)
+
+        mean_valid = validate(valid_loader, actor, reward_fn, render_fn,
+                              valid_dir, num_plot=5)
+
+        # Save best model parameters
+        if mean_valid < best_reward:
+
+            best_reward = mean_valid
+
+            save_path = os.path.join(save_dir, 'actor.pt')
+            torch.save(actor.state_dict(), save_path)
+
+            save_path = os.path.join(save_dir, 'critic.pt')
+            torch.save(critic.state_dict(), save_path)
+
+        print('Mean epoch loss/reward: %2.4f, %2.4f, %2.4f, took: %2.4fs '\
+              '(%2.4fs / 100 batches)\n' % \
+              (mean_loss, mean_reward, mean_valid, time.time() - epoch_start,
+              np.mean(times)))
+
 
 
 def train_tsp(args):
 
-    # Goals:
-    # TSP20, 3.82  (Optimal) - 3.97  (DRL4VRP)
-    # TSP50, 5.70  (Optimal) - 6.08  (DRL4VRP)
-    # TSP100, 7.77 (OptimalBS) - 8.44 (DRL4VRP)
+    # Goals from paper:
+    # TSP20, 3.97
+    # TSP50, 6.08
+    # TSP100, 8.44
 
     from tasks import tsp
     from tasks.tsp import TSPDataset
 
     STATIC_SIZE = 2 # (x, y)
-    DYNAMIC_SIZE = 1 # dummy for compatability
+    DYNAMIC_SIZE = 1 # dummy for compatibility
 
-    train_data = TSPDataset(args['num_nodes'], args['train_size'], args['seed'])
-    valid_data = TSPDataset(args['num_nodes'], args['valid_size'], args['seed'])
+    train_data = TSPDataset(args.num_nodes, args.train_size, args.seed)
+    valid_data = TSPDataset(args.num_nodes, args.valid_size, args.seed + 1)
 
-    args['train_data'] = train_data
-    args['valid_data'] = valid_data
-    args['reward_fn'] = tsp.reward
-    args['render_fn'] = tsp.render
-    mask_fn = tsp.update_mask
     update_fn = None
 
-    actor = DRL4TSP(STATIC_SIZE, 
-                    DYNAMIC_SIZE, 
-                    args['hidden_size'], 
+    actor = DRL4TSP(STATIC_SIZE,
+                    DYNAMIC_SIZE,
+                    args.hidden_size,
                     update_fn,
-                    mask_fn, 
-                    args['num_layers'], 
-                    args['dropout']).to(device)
+                    tsp.update_mask,
+                    args.num_layers,
+                    args.dropout).to(device)
 
-    #critic = Critic(args['hidden_size']).to(device)
-    critic = StateCritic(STATIC_SIZE, DYNAMIC_SIZE, args['hidden_size']).to(device)
-    
-    train(actor, critic, **args)
+    critic = StateCritic(STATIC_SIZE, DYNAMIC_SIZE, args.hidden_size).to(device)
+
+    kwargs = vars(args)
+    kwargs['train_data'] = train_data
+    kwargs['valid_data'] = valid_data
+    kwargs['reward_fn'] = tsp.reward
+    kwargs['render_fn'] = tsp.render
+
+    if args.checkpoint:
+        path = os.path.join(args.checkpoint, 'actor.pt')
+        actor.load_state_dict(torch.load(path, device))
+
+        path = os.path.join(args.checkpoint, 'critic.pt')
+        critic.load_state_dict(torch.load(path, device))
+
+    if not args.test:
+        train(actor, critic, **kwargs)
+
+    test_data = TSPDataset(args.num_nodes, args.train_size, args.seed + 2)
+
+    test_dir = 'test'
+    test_loader = DataLoader(test_data, args.batch_size, False, num_workers=0)
+    out = validate(test_loader, actor, tsp.reward, tsp.render, test_dir, num_plot=5)
+
+    print('Average tour length: ', out)
 
 
 def train_vrp(args):
 
-    # Goals:
-    # VRP10, Capacity 20:  4.65  (BS) - 4.80  (Greedy)
-    # VRP20, Capacity 30:  6.34  (BS) - 6.51  (Greedy)
-    # VRP50, Capacity 40:  11.08 (BS) - 11.32 (Greedy)
-    # VRP100, Capacity 50: 16.86 (BS) - 17.12 (Greedy)
+    # Goals from paper:
+    # VRP10, Capacity 20:  4.84  (Greedy)
+    # VRP20, Capacity 30:  6.59  (Greedy)
+    # VRP50, Capacity 40:  11.39 (Greedy)
+    # VRP100, Capacity 50: 17.23  (Greedy)
 
     from tasks import vrp
     from tasks.vrp import VehicleRoutingDataset
@@ -270,70 +307,86 @@ def train_vrp(args):
     STATIC_SIZE = 2 # (x, y)
     DYNAMIC_SIZE = 2 # (load, demand)
 
-    max_load = LOAD_DICT[args['num_nodes']]
+    max_load = LOAD_DICT[args.num_nodes]
 
-    train_data = VehicleRoutingDataset(args['train_size'], 
-                                       args['num_nodes'],
-                                       max_load, MAX_DEMAND, args['seed'])
-    valid_data = VehicleRoutingDataset(args['valid_size'], 
-                                       args['num_nodes'],
-                                       max_load, MAX_DEMAND, args['seed'])
+    train_data = VehicleRoutingDataset(args.train_size,
+                                       args.num_nodes,
+                                       max_load,
+                                       MAX_DEMAND,
+                                       args.seed)
 
-    args['train_data'] = train_data
-    args['valid_data'] = valid_data
-    args['reward_fn'] = vrp.reward
-    args['render_fn'] = vrp.render
+    valid_data = VehicleRoutingDataset(args.valid_size,
+                                       args.num_nodes,
+                                       max_load,
+                                       MAX_DEMAND,
+                                       args.seed + 1)
 
-    actor = DRL4TSP(STATIC_SIZE, 
-                    DYNAMIC_SIZE, 
-                    args['hidden_size'], 
+    actor = DRL4TSP(STATIC_SIZE,
+                    DYNAMIC_SIZE,
+                    args.hidden_size,
                     train_data.update_dynamic,
-                    train_data.update_mask, 
-                    args['num_layers'], 
-                    args['dropout']).to(device)
-    #critic = Critic(args['hidden_size']).to(device)
-    critic = StateCritic(STATIC_SIZE, DYNAMIC_SIZE, args['hidden_size']).to(device)
+                    train_data.update_mask,
+                    args.num_layers,
+                    args.dropout).to(device)
 
-    train(actor, critic, **args)
+    critic = StateCritic(STATIC_SIZE, DYNAMIC_SIZE, args.hidden_size).to(device)
 
-    '''
-    # path = 'vrp/50/checkpoints/batch13499_11.5925_'
-    path = 'vrp/50/checkpoints/batch499_11.6461_'
-    params = torch.load(path + 'actor.pt', map_location=lambda storage, loc: storage)
-    actor.load_state_dict(params)
+    kwargs = vars(args)
+    kwargs['train_data'] = train_data
+    kwargs['valid_data'] = valid_data
+    kwargs['reward_fn'] = vrp.reward
+    kwargs['render_fn'] = vrp.render
 
-    params = torch.load(path + 'critic.pt', map_location=lambda storage, loc: storage)
-    critic.load_state_dict(params)
-    '''
+    if args.checkpoint:
+        path = os.path.join(args.checkpoint, 'actor.pt')
+        actor.load_state_dict(torch.load(path, device))
+
+        path = os.path.join(args.checkpoint, 'critic.pt')
+        critic.load_state_dict(torch.load(path, device))
+
+    if not args.test:
+        train(actor, critic, **kwargs)
+
+    test_data = VehicleRoutingDataset(args.valid_size,
+                                      args.num_nodes,
+                                      max_load,
+                                      MAX_DEMAND,
+                                      args.seed + 2)
+
+    test_dir = 'test'
+    test_loader = DataLoader(test_data, args.batch_size, False, num_workers=0)
+    out = validate(test_loader, actor, vrp.reward, vrp.render, test_dir, num_plot=5)
+
+    print('Average tour length: ', out)
 
 
 if __name__ == '__main__':
+
     parser = argparse.ArgumentParser(description='Combinatorial Optimization')
-    parser.add_argument('--seed', dest='seed', default=1234, type=int)
-    parser.add_argument('--task', dest='task', default='tsp')
+    parser.add_argument('--seed', default=12345, type=int)
+    parser.add_argument('--checkpoint', default=None)
+    parser.add_argument('--test', action='store_true', default=False)
+    parser.add_argument('--task', default='tsp')
     parser.add_argument('--nodes', dest='num_nodes', default=20, type=int)
-    parser.add_argument('--actor_lr', dest='actor_lr', default=1e-3, type=float)
-    parser.add_argument('--critic_lr', dest='critic_lr', default=1e-3,
-                        type=float)
-    parser.add_argument('--max_grad_norm', dest='max_grad_norm', default=2.,
-                        type=float)
-    parser.add_argument('--checkpoint', dest='checkpoint_every', default=500,
-                        type=int)
-    parser.add_argument('--batch_size', dest='batch_size', default=128, type=int)
+    parser.add_argument('--actor_lr', default=5e-4, type=float)
+    parser.add_argument('--critic_lr', default=5e-4, type=float)
+    parser.add_argument('--max_grad_norm', default=2., type=float)
+    parser.add_argument('--batch_size', default=256, type=int)
     parser.add_argument('--hidden', dest='hidden_size', default=128, type=int)
-    parser.add_argument('--dropout', dest='dropout', default=0.1, type=float)
+    parser.add_argument('--dropout', default=0.1, type=float)
     parser.add_argument('--layers', dest='num_layers', default=1, type=int)
-    parser.add_argument('--optimizer', dest='optimizer', default='adam')
-    parser.add_argument('--train_size', dest='train_size', default=1000000,
-                        type=int)
-    parser.add_argument('--valid_size', dest='valid_size', default=1000,
-                        type=int)
+    parser.add_argument('--train-size',default=1000000, type=int)
+    parser.add_argument('--valid-size', default=1000, type=int)
 
-    args = vars(parser.parse_args())
+    args = parser.parse_args()
 
-    if args['task'] == 'tsp':
+    #print('NOTE: SETTTING CHECKPOINT: ')
+    #args.checkpoint = os.path.join('vrp', '10', '12_59_47.350165' + os.path.sep)
+    #print(args.checkpoint)
+
+    if args.task == 'tsp':
         train_tsp(args)
-    elif args['task'] == 'vrp':
+    elif args.task == 'vrp':
         train_vrp(args)
     else:
-        raise ValueError('Task <%s> not understood'%args['task'])
+        raise ValueError('Task <%s> not understood'%args.task)
