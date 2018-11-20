@@ -12,7 +12,8 @@ Currently, Traveling Salesman Problems and Vehicle Routing Problems are supporte
 
 ## TSP Sample Tours:
 
-__Left__: TSP with 20 cities
+__Left__: TSP with 20 cities 
+
 __Right__: TSP with 50 cities
 
 <p align="center">
@@ -22,7 +23,8 @@ __Right__: TSP with 50 cities
 
 ## VRP Sample Tours:
 
-__Left__: VRP with 10 cities + load 20
+__Left__: VRP with 10 cities + load 20 
+
 __Right__: VRP with 20 cities + load 30
 
 <p align="center">
@@ -39,9 +41,9 @@ Tasks and complexity can be changed through the "task" and "nodes" flag:
 
 ```python trainer.py --task=vrp --nodes=10```
 
-To Restore a checkpoint, you must specify the path to a folder that has "actor.pt" and "critic.pt" checkpoints. Sample weights can be found [here](https://drive.google.com/open?id=1wxccGStVglspW-qIpUeMPXAGHh2HsFpF)
+To restore a checkpoint, you must specify the path to a folder that has "actor.pt" and "critic.pt" checkpoints. Sample weights can be found [here](https://drive.google.com/open?id=1wxccGStVglspW-qIpUeMPXAGHh2HsFpF)
 
-```python trainer.py --task=vrp --nodes=10 --checkpoint=vrp20```
+```python trainer.py --task=vrp --nodes=10 --checkpoint=vrp10```
 ## Differences from paper:
 
 * Uses a GRU instead of LSTM for the decoder network
