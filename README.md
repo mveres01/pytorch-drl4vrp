@@ -10,23 +10,6 @@ Currently, Traveling Salesman Problems and Vehicle Routing Problems are supporte
 * pytorch=0.4.1
 * matplotlib
 
-## To Run:
-
-Run by callinig ```python trainer.py```
-
-Tasks and complexity can be changed through the "task" and "nodes" flag:
-
-```python trainer.py --task=vrp --nodes=10```
-
-To Restore a checkpoint, you must specify the path to a folder that has "actor.pt" and "critic.pt" checkpoints. Sample weights can be found [here](https://drive.google.com/open?id=1wxccGStVglspW-qIpUeMPXAGHh2HsFpF)
-
-```python trainer.py --task=vrp --nodes=10 --checkpoint=vrp20```
-
-## Differences from paper:
-
-* Uses a GRU instead of LSTM for the decoder network
-* Critic takes the raw static and dynamic input states and predicts a reward
-
 ## TSP Sample Tours:
 
 __Left__: TSP with 20 cities
@@ -46,6 +29,23 @@ __Right__: VRP with 20 cities + load 30
   <img src="./docs/vrp10.png" width="300"/>
   <img src="./docs/vrp20.png" width="300"/>
 </p>
+
+
+# To Run
+
+Run by calling ```python trainer.py```
+
+Tasks and complexity can be changed through the "task" and "nodes" flag:
+
+```python trainer.py --task=vrp --nodes=10```
+
+To Restore a checkpoint, you must specify the path to a folder that has "actor.pt" and "critic.pt" checkpoints. Sample weights can be found [here](https://drive.google.com/open?id=1wxccGStVglspW-qIpUeMPXAGHh2HsFpF)
+
+```python trainer.py --task=vrp --nodes=10 --checkpoint=vrp20```
+## Differences from paper:
+
+* Uses a GRU instead of LSTM for the decoder network
+* Critic takes the raw static and dynamic input states and predicts a reward
 
 # TSP
 
