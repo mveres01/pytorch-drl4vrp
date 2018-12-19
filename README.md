@@ -70,6 +70,8 @@ In this project the following dynamic updates are used:
 
 # Results:
 
+## Tour Accuracay
+
 This repo only implements the "Greedy" approach during test time, which selects the city with the highest probability. Tour length comparing this project to the corresponding paper is reported below. Differences in tour length may likely be optimized further through hyperparameter search, which has not been conducted here. 
 
 |               | Paper ("Greedy") | This  |
@@ -81,6 +83,35 @@ This repo only implements the "Greedy" approach during test time, which selects 
 | VRP20 Cap 30  | 6.59             | 6.904 |
 | VRP50 Cap 40  | 11.39            |       |
 | VRP100 Cap 50 | 17.23            |       |
+
+## Training Time
+
+On a Tesla P-100 GPU, the following training times are observed. Results were obtained by taking the the total time for the first 100 training iterations (with respective batch sizes), and converting into the appopriate time unit. Note that for the VRP in particular, as models are relatively untrained during this time, this may be slightly inaccurating results and YMMV. 
+
+| Task   | Batch Size | Sec / 100 Updates | Sec / Epoch | Hours / Epoch | 20 Epochs |
+|--------|------------|-------------------|-------------|---------------|-----------|
+| TSP20  | 128        | 4.71              | 367.95      | 0.10          | 2.04      |
+| TSP20  | 256        | 6.42              | 250.76      | 0.07          | 1.39      |
+| TSP20  | 512        | 9.95              | 194.34      | 0.05          | 1.08      |
+| TSP50  | 128        | 21.64             | 1690.34     | 0.47          | 9.39      |
+| TSP50  | 256        | 31.33             | 1223.94     | 0.34          | 6.80      |
+| TSP50  | 512        | 51.70             | 1009.80     | 0.28          | 5.61      |
+| TSP100 | 128        | 48.27             | 3770.73     | 1.05          | 20.95     |
+| TSP100 | 256        | 73.51             | 2871.29     | 0.80          | 15.95     |
+
+| Task   | Batch Size | Sec / 100 Updates | Sec / Epoch | Hours / Epoch | 20 Epochs |
+|--------|------------|-------------------|-------------|---------------|-----------|
+| VRP10  | 128        | 12.15             | 949.33      | 0.26          | 5.27      |
+| VRP10  | 256        | 15.75             | 615.04      | 0.17          | 3.42      |
+| VRP10  | 512        | 23.30             | 455.04      | 0.13          | 2.53      |
+| VRP20  | 128        | 21.45             | 1676.09     | 0.47          | 9.31      |
+| VRP20  | 256        | 28.29             | 1105.25     | 0.31          | 6.14      |
+| VRP20  | 512        | 43.20             | 843.74      | 0.23          | 4.69      |
+| VRP50  | 128        | 53.59             | 4186.45     | 1.16          | 23.26     |
+| VRP50  | 256        | 77.25             | 3017.57     | 0.84          | 16.76     |
+| VRP50  | 512        | 127.73            | 2494.77     | 0.69          | 13.86     |
+| VRP100 | 128        | 130.06            | 10160.95    | 2.82          | 56.45     |
+| VRP100 | 64         | 95.03             | 14849.08    | 4.12          | 82.49     |
 
 # Acknowledgements:
 
