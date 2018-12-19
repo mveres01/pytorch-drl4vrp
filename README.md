@@ -48,6 +48,7 @@ To restore a checkpoint, you must specify the path to a folder that has "actor.p
 
 * Uses a GRU instead of LSTM for the decoder network
 * Critic takes the raw static and dynamic input states and predicts a reward
+* (Unsure) Here we use demand scaling (MAX_DEMAND / MAX_VEHICLE_CAPACITY), and give the depot for the VRP a negative value proportionaly to the missing capacity
 
 # TSP
 
@@ -70,7 +71,7 @@ In this project the following dynamic updates are used:
 
 # Results:
 
-## Tour Accuracay
+## Tour Accuracy
 
 This repo only implements the "Greedy" approach during test time, which selects the city with the highest probability. Tour length comparing this project to the corresponding paper is reported below. Differences in tour length may likely be optimized further through hyperparameter search, which has not been conducted here. 
 
@@ -87,6 +88,7 @@ This repo only implements the "Greedy" approach during test time, which selects 
 ## Training Time
 
 On a Tesla P-100 GPU, the following training times are observed. Results were obtained by taking the the total time for the first 100 training iterations (with respective batch sizes), and converting into the appopriate time unit. Note that for the VRP in particular, as models are relatively untrained during this time, this may be slightly inaccurating results and YMMV. 
+
 | Task   | Batch Size | Sec / 100 Updates | Min / Epoch | Hours/Epoch | 20 Epochs |
 |--------|------------|-------------------|-------------|-------------|-----------|
 | TSP20  | 128        | 8.23              | 10.71       | 0.18        | 3.57      |
