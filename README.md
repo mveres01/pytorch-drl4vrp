@@ -25,7 +25,7 @@ To restore a checkpoint, you must specify the path to a folder that has "actor.p
 
 * Uses a GRU instead of LSTM for the decoder network
 * Critic takes the raw static and dynamic input states and predicts a reward
-* Here we use demand scaling (MAX_DEMAND / MAX_VEHICLE_CAPACITY), and give the depot for the VRP a negative value proportionaly to the missing capacity (Unsure if used or not)
+* Use demand scaling (MAX_DEMAND / MAX_VEHICLE_CAPACITY), and give the depot for the VRP a negative value proportionate to the missing capacity (Unsure if used or not)
 
 ## TSP Sample Tours:
 
@@ -89,7 +89,7 @@ This repo only implements the "Greedy" approach during test time, which selects 
 
 ## Training Time
 
-On a Tesla P-100 GPU, the following training times are observed. Results were obtained by taking the the total time for the first 100 training iterations (with respective batch sizes), and converting into the appopriate time unit. Note that for the VRP in particular, as models are relatively untrained during this time, this may be slightly inaccurating results and YMMV. 
+On a Tesla P-100 GPU, the following training times are observed. Results were obtained by taking the the total time for the first 100 training iterations (with respective batch sizes), and converting into the appopriate time unit. Note that for the VRP in particular, as models are relatively untrained during this time, this may be slightly inaccurate results and YMMV. 
 
 | Task   | Batch Size | Sec / 100 Updates | Min / Epoch | Hours/Epoch | 20 Epochs |
 |--------|------------|-------------------|-------------|-------------|-----------|
@@ -102,19 +102,19 @@ On a Tesla P-100 GPU, the following training times are observed. Results were ob
 | TSP100 | 128        | 48.27             | 62.85       | 1.05        | 20.95     |
 | TSP100 | 256        | 73.51             | 47.85       | 0.80        | 15.95     |
 
-| Task   | Batch Size | Time / 100 Updates | Min / Epoch | Hours/Epoch | 20 Epochs |
-|--------|------------|--------------------|-------------|-------------|-----------|
-| VRP10  | 128        | 12.15              | 15.82       | 0.26        | 5.27      |
-| VRP10  | 256        | 15.75              | 10.25       | 0.17        | 3.42      |
-| VRP10  | 512        | 23.30              | 7.58        | 0.13        | 2.53      |
-| VRP20  | 128        | 21.45              | 27.93       | 0.47        | 9.31      |
-| VRP20  | 256        | 28.29              | 18.42       | 0.31        | 6.14      |
-| VRP20  | 512        | 43.20              | 14.06       | 0.23        | 4.69      |
-| VRP50  | 128        | 53.59              | 69.77       | 1.16        | 23.26     |
-| VRP50  | 256        | 77.25              | 50.29       | 0.84        | 16.76     |
-| VRP50  | 512        | 127.73             | 41.58       | 0.69        | 13.86     |
-| VRP100 | 128        | 130.06             | 169.35      | 2.82        | 56.45     |
-| VRP100 | 64         | 95.03              | 247.48      | 4.12        | 82.49     |
+| Task   | Batch Size | Sec / 100 Updates | Min / Epoch | Hours/Epoch | 20 Epochs |
+|--------|------------|-------------------|-------------|-------------|-----------|
+| VRP10  | 128        | 12.15             | 15.82       | 0.26        | 5.27      |
+| VRP10  | 256        | 15.75             | 10.25       | 0.17        | 3.42      |
+| VRP10  | 512        | 23.30             | 7.58        | 0.13        | 2.53      |
+| VRP20  | 128        | 21.45             | 27.93       | 0.47        | 9.31      |
+| VRP20  | 256        | 28.29             | 18.42       | 0.31        | 6.14      |
+| VRP20  | 512        | 43.20             | 14.06       | 0.23        | 4.69      |
+| VRP50  | 128        | 53.59             | 69.77       | 1.16        | 23.26     |
+| VRP50  | 256        | 77.25             | 50.29       | 0.84        | 16.76     |
+| VRP50  | 512        | 127.73            | 41.58       | 0.69        | 13.86     |
+| VRP100 | 128        | 130.06            | 169.35      | 2.82        | 56.45     |
+| VRP100 | 64         | 95.03             | 247.48      | 4.12        | 82.49     |
 
 # Acknowledgements:
 
