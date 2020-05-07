@@ -84,8 +84,8 @@ class VehicleRoutingDataset(Dataset):
 
         if repeat_home.any():
             new_mask[repeat_home.nonzero(), 0] = 1.
-        if (1 - repeat_home).any():
-            new_mask[(1 - repeat_home).nonzero(), 0] = 0.
+        if (~repeat_home).any():
+            new_mask[(~repeat_home).nonzero(), 0] = 0.
 
         # ... unless we're waiting for all other samples in a minibatch to finish
         has_no_load = loads[:, 0].eq(0).float()
